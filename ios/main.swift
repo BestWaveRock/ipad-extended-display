@@ -39,8 +39,10 @@ final class DisplayViewController: UIViewController {
 
     private let audioEngine = AVAudioEngine()
     private let audioPlayer = AVAudioPlayerNode()
+    private let audioQueue = DispatchQueue(label: "ipaddisplay.audio")
     private var audioFormat: AVAudioFormat?
     private var audioRunning = false
+    private var queuedAudioFrames = 0
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -213,13 +215,13 @@ final class DisplayViewController: UIViewController {
         let channels = UInt32(bytes[4]) << 8 | UInt32(bytes[5])
         let bits = UInt32(bytes[6]) << 8 | UInt32(bytes[7])
         guard sampleRate >= 8000, channels > 0, channels <= 8, bits == 16 else { return }
-        DispatchQueue.main.async { [weak self] in
+        audioQueue.async { [weak self] in
             self?.startAudio(sampleRate: sampleRate, channels: channels)
         }
     }
 
     private func startAudio(sampleRate: Double, channels: UInt32) {
-        stopAudio()
+        teardownAudio()
         guard let format = AVAudioFormat(commonFormat: .pcmFormatInt16,
                                          sampleRate: sampleRate,
                                          channels: AVAudioChannelCount(channels),
@@ -241,9 +243,14 @@ final class DisplayViewController: UIViewController {
     }
 
     private func stopAudio() {
+        audioQueue.async { [weak self] in self?.teardownAudio() }
+    }
+
+    private func teardownAudio() {
         guard audioRunning || audioFormat != nil else { return }
         audioRunning = false
         audioFormat = nil
+        queuedAudioFrames = 0
         audioPlayer.stop()
         audioEngine.stop()
         audioEngine.disconnectNodeOutput(audioPlayer)
@@ -252,20 +259,25 @@ final class DisplayViewController: UIViewController {
     }
 
     private func enqueueAudio(_ payload: Data) {
-        guard audioRunning, let format = audioFormat else { return }
-        let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
-        guard bytesPerFrame > 0 else { return }
-        let frames = payload.count / bytesPerFrame
-        guard frames > 0,
-              let buffer = AVAudioPCMBuffer(pcmFormat: format,
-                                            frameCapacity: AVAudioFrameCount(frames)),
-              let target = buffer.int16ChannelData?[0] else { return }
-        buffer.frameLength = AVAudioFrameCount(frames)
-        payload.withUnsafeBytes { raw in
-            guard let base = raw.baseAddress else { return }
-            memcpy(target, base, frames * bytesPerFrame)
+        audioQueue.async { [weak self] in
+            guard let self, audioRunning, let format = audioFormat else { return }
+            let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
+            guard bytesPerFrame > 0 else { return }
+            let frames = payload.count / bytesPerFrame
+            guard frames > 0, queuedAudioFrames < Int(format.sampleRate),
+                  let buffer = AVAudioPCMBuffer(pcmFormat: format,
+                                                frameCapacity: AVAudioFrameCount(frames)),
+                  let target = buffer.int16ChannelData?[0] else { return }
+            buffer.frameLength = AVAudioFrameCount(frames)
+            payload.withUnsafeBytes { raw in
+                guard let base = raw.baseAddress else { return }
+                memcpy(target, base, frames * bytesPerFrame)
+            }
+            queuedAudioFrames += frames
+            audioPlayer.scheduleBuffer(buffer) { [weak self] in
+                self?.audioQueue.async { self?.queuedAudioFrames -= frames }
+            }
         }
-        audioPlayer.scheduleBuffer(buffer, completionHandler: nil)
     }
 
     private func configure(with payload: Data) {
