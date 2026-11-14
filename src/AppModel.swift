@@ -12,6 +12,7 @@ struct DisplayDevice: Identifiable, Hashable {
     let id: String
     let name: String
     let detail: String
+    let kind: String?
     let transport: Transport
     let usbDeviceID: Int?
     let host: String?
@@ -166,8 +167,9 @@ final class AppModel: ObservableObject {
             }
             usb = byUDID.values.filter { $0.isUSB }.map { device in
                 DisplayDevice(id: "usb-" + device.udid,
-                              name: device.model ?? "iPad",
+                              name: device.friendlyName,
                               detail: device.shortUDID,
+                              kind: device.productKind,
                               transport: .usb,
                               usbDeviceID: device.deviceID,
                               host: nil,
@@ -185,12 +187,19 @@ final class AppModel: ObservableObject {
             DisplayDevice(id: "wifi-" + display.name,
                           name: display.name,
                           detail: "\(display.host):\(display.port)",
+                          kind: nil,
                           transport: .wifi,
                           usbDeviceID: nil,
                           host: display.host,
                           port: UInt16(display.port))
         }
-        let merged = usbDevices + wifi
+        let merged = (usbDevices + wifi).sorted { left, right in
+            if (left.kind == "iPad") != (right.kind == "iPad") {
+                return left.kind == "iPad"
+            }
+            if left.transport != right.transport { return left.isUSB }
+            return left.name < right.name
+        }
         devices = merged
         if selectedDeviceID == nil || !merged.contains(where: { $0.id == selectedDeviceID }) {
             selectedDeviceID = merged.first(where: { $0.isUSB })?.id ?? merged.first?.id
@@ -214,6 +223,9 @@ final class AppModel: ObservableObject {
         }
         if accessibilityPermission != .granted {
             append("提醒：未授予辅助功能权限，画面能看但触控无效")
+        }
+        if let kind = device.kind, kind != "iPad" {
+            append("注意：\(device.name) 看起来是 \(kind)，需要先在它上面安装 iPad 端 App，画面比例也可能不是 4:3")
         }
         phase = .preparing
         append("连接 \(device.name) · \(device.transport.rawValue) …")

@@ -6,6 +6,7 @@ struct MuxDevice: Identifiable, Hashable {
     let udid: String
     let name: String?
     let model: String?
+    let productID: Int?
     let connectionType: String
 
     var isUSB: Bool { connectionType == "USB" }
@@ -13,8 +14,24 @@ struct MuxDevice: Identifiable, Hashable {
         guard udid.count > 16 else { return udid }
         return "\(udid.prefix(8))…\(udid.suffix(6))"
     }
+    var productKind: String? {
+        if let name, !name.isEmpty { return name }
+        if let model, !model.isEmpty {
+            if model.hasPrefix("iPad") { return "iPad" }
+            if model.hasPrefix("iPhone") { return "iPhone" }
+            if model.hasPrefix("iPod") { return "iPod" }
+        }
+        switch productID {
+        case 4779: return "iPad"
+        case 4776: return "iPhone"
+        default: return nil
+        }
+    }
+    var friendlyName: String {
+        productKind ?? "iOS 设备"
+    }
     var displayName: String {
-        let label = name ?? model ?? "iPad"
+        let label = friendlyName
         return isUSB ? "\(label) · USB" : "\(label) · Wi-Fi"
     }
 }
@@ -140,6 +157,7 @@ enum Usbmux {
                              udid: udid,
                              name: properties["DeviceName"] as? String,
                              model: properties["ProductType"] as? String,
+                             productID: properties["ProductID"] as? Int,
                              connectionType: properties["ConnectionType"] as? String ?? "USB")
         }
     }
