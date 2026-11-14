@@ -42,6 +42,7 @@ final class DisplayViewController: UIViewController {
     private let audioQueue = DispatchQueue(label: "ipaddisplay.audio")
     private var audioFormat: AVAudioFormat?
     private var audioRunning = false
+    private var audioAttached = false
     private var queuedAudioFrames = 0
 
     override func viewDidLoad() {
@@ -222,22 +223,33 @@ final class DisplayViewController: UIViewController {
 
     private func startAudio(sampleRate: Double, channels: UInt32) {
         teardownAudio()
-        guard let format = AVAudioFormat(commonFormat: .pcmFormatInt16,
-                                         sampleRate: sampleRate,
-                                         channels: AVAudioChannelCount(channels),
-                                         interleaved: true) else { return }
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate,
+                                         channels: AVAudioChannelCount(channels)) else { return }
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, mode: .default)
         try? session.setActive(true)
 
-        audioEngine.attach(audioPlayer)
-        audioEngine.connect(audioPlayer, to: audioEngine.mainMixerNode, format: format)
-        audioEngine.prepare()
-        guard (try? audioEngine.start()) != nil else {
-            audioEngine.detach(audioPlayer)
+        let failure = IDRunCatchingException { [self] in
+            audioEngine.attach(audioPlayer)
+            audioAttached = true
+            audioEngine.connect(audioPlayer, to: audioEngine.mainMixerNode, format: format)
+            audioEngine.prepare()
+            try? audioEngine.start()
+            audioPlayer.play()
+        }
+
+        guard failure == nil, audioEngine.isRunning else {
+            let reason = failure ?? "音频引擎未启动"
+            DispatchQueue.main.async { [weak self] in
+                self?.showStatus("音频不可用，画面继续\n\(reason)")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                    self?.showStatus(nil)
+                }
+            }
+            teardownAudio()
             return
         }
-        audioPlayer.play()
+
         audioFormat = format
         audioRunning = true
     }
@@ -247,31 +259,39 @@ final class DisplayViewController: UIViewController {
     }
 
     private func teardownAudio() {
-        guard audioRunning || audioFormat != nil else { return }
+        guard audioRunning || audioFormat != nil || audioAttached else { return }
         audioRunning = false
         audioFormat = nil
         queuedAudioFrames = 0
-        audioPlayer.stop()
-        audioEngine.stop()
-        audioEngine.disconnectNodeOutput(audioPlayer)
-        audioEngine.detach(audioPlayer)
+        if audioAttached {
+            audioAttached = false
+            audioPlayer.stop()
+            audioEngine.stop()
+            audioEngine.disconnectNodeOutput(audioPlayer)
+            audioEngine.detach(audioPlayer)
+        }
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     private func enqueueAudio(_ payload: Data) {
         audioQueue.async { [weak self] in
             guard let self, audioRunning, let format = audioFormat else { return }
-            let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
-            guard bytesPerFrame > 0 else { return }
-            let frames = payload.count / bytesPerFrame
+            let channelCount = Int(format.channelCount)
+            guard channelCount > 0 else { return }
+            let frames = payload.count / (channelCount * MemoryLayout<Int16>.size)
             guard frames > 0, queuedAudioFrames < Int(format.sampleRate),
                   let buffer = AVAudioPCMBuffer(pcmFormat: format,
                                                 frameCapacity: AVAudioFrameCount(frames)),
-                  let target = buffer.int16ChannelData?[0] else { return }
+                  let output = buffer.floatChannelData else { return }
             buffer.frameLength = AVAudioFrameCount(frames)
             payload.withUnsafeBytes { raw in
-                guard let base = raw.baseAddress else { return }
-                memcpy(target, base, frames * bytesPerFrame)
+                guard let base = raw.baseAddress?.assumingMemoryBound(to: Int16.self) else { return }
+                for channel in 0..<channelCount {
+                    let target = output[channel]
+                    for frame in 0..<frames {
+                        target[frame] = Float(base[frame * channelCount + channel]) / 32_768
+                    }
+                }
             }
             queuedAudioFrames += frames
             audioPlayer.scheduleBuffer(buffer) { [weak self] in

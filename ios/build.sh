@@ -5,10 +5,15 @@ cd "$(dirname "$0")"
 SDK=$(xcrun --sdk iphoneos --show-sdk-path)
 OUT=build
 APP="$OUT/Payload/iPadDisplay.app"
-rm -rf "$OUT"
+TRASH="${TMPDIR:-/tmp}/ipad-display-ios-trash"
+mkdir -p "$TRASH"
+if [[ -d "$OUT" ]]; then mv "$OUT" "$TRASH/build-$(date +%H%M%S)"; fi
 mkdir -p "$APP"
 
-swiftc -target arm64-apple-ios12.5 -sdk "$SDK" -O -parse-as-library main.swift -o "$APP/iPadDisplay" \
+clang -c -target arm64-apple-ios12.5 -isysroot "$SDK" -fobjc-arc ExceptionGuard.m -o "$OUT/ExceptionGuard.o"
+
+swiftc -target arm64-apple-ios12.5 -sdk "$SDK" -O -parse-as-library main.swift "$OUT/ExceptionGuard.o" -o "$APP/iPadDisplay" \
+  -import-objc-header Bridging.h \
   -framework UIKit -framework Network -framework AVFoundation -framework CoreMedia -framework VideoToolbox
 
 cp ../assets/ios/*.png "$APP/"
@@ -24,8 +29,8 @@ cat > "$APP/Info.plist" <<'PLIST'
     <key>CFBundleName</key><string>iPadDisplay</string>
     <key>CFBundleDisplayName</key><string>iPad 扩展屏</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.0.2</string>
-    <key>CFBundleVersion</key><string>2</string>
+    <key>CFBundleShortVersionString</key><string>1.0.3</string>
+    <key>CFBundleVersion</key><string>3</string>
     <key>NSLocalNetworkUsageDescription</key><string>用于在局域网内被 Mac 发现，把 iPad 作为扩展屏。</string>
     <key>NSBonjourServices</key>
     <array>
