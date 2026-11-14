@@ -1,4 +1,5 @@
 import AVFoundation
+import MediaPlayer
 import Network
 import UIKit
 
@@ -29,7 +30,10 @@ final class DisplayViewController: UIViewController {
     private let statusLabel = UILabel()
     private let statusContainer = UIView()
     private let touchView = TouchView()
-    private let controlButton = UIButton(type: .system)
+    private let controlBar = UIStackView()
+    private let audioButton = UIButton(type: .system)
+    private let linkButton = UIButton(type: .system)
+    private let volumeView = MPVolumeView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
 
     private var listener: NWListener?
     private var connection: NWConnection?
@@ -38,6 +42,11 @@ final class DisplayViewController: UIViewController {
     private var frameIndex: Int64 = 0
     private var renderedFrames = 0
     private var listening = false
+    private var controlsVisible = true
+    private var suppressGesture = false
+    private var fadeWork: DispatchWorkItem?
+    private let audioStateLock = NSLock()
+    private var audioMuted = UserDefaults.standard.bool(forKey: "ipadAudioMuted")
 
     private let audioEngine = AVAudioEngine()
     private let audioPlayer = AVAudioPlayerNode()
@@ -77,21 +86,36 @@ final class DisplayViewController: UIViewController {
 
         touchView.translatesAutoresizingMaskIntoConstraints = false
         touchView.onTouch = { [weak self] phase, point in
-            self?.sendTouch(phase: phase, point: point)
+            guard let self else { return }
+            if phase == 0 {
+                if !self.controlsVisible {
+                    self.suppressGesture = true
+                    self.showControls()
+                    return
+                }
+                self.suppressGesture = false
+            }
+            guard !self.suppressGesture else { return }
+            self.sendTouch(phase: phase, point: point)
         }
         view.addSubview(touchView)
 
-        controlButton.setTitle("断开", for: .normal)
-        controlButton.setTitleColor(.white, for: .normal)
-        controlButton.titleLabel?.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
-        controlButton.backgroundColor = UIColor.black.withAlphaComponent(0.55)
-        controlButton.layer.cornerRadius = 18
-        controlButton.layer.borderWidth = 1
-        controlButton.layer.borderColor = UIColor.white.withAlphaComponent(0.22).cgColor
-        controlButton.contentEdgeInsets = UIEdgeInsets(top: 8, left: 18, bottom: 8, right: 18)
-        controlButton.translatesAutoresizingMaskIntoConstraints = false
-        controlButton.addTarget(self, action: #selector(toggleLink), for: .touchUpInside)
-        view.addSubview(controlButton)
+        configureControl(audioButton, action: #selector(toggleAudio))
+        configureControl(linkButton, action: #selector(toggleLink))
+
+        controlBar.axis = .horizontal
+        controlBar.spacing = 10
+        controlBar.alignment = .fill
+        controlBar.translatesAutoresizingMaskIntoConstraints = false
+        controlBar.addArrangedSubview(audioButton)
+        controlBar.addArrangedSubview(linkButton)
+        view.addSubview(controlBar)
+
+        volumeView.alpha = 0.01
+        volumeView.isUserInteractionEnabled = false
+        view.addSubview(volumeView)
+        updateAudioButton()
+        updateLinkButton()
 
         NSLayoutConstraint.activate([
             statusContainer.centerXAnchor.constraint(equalTo: view.centerXAnchor),
@@ -106,8 +130,12 @@ final class DisplayViewController: UIViewController {
             touchView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             touchView.topAnchor.constraint(equalTo: view.topAnchor),
             touchView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            controlButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -18),
-            controlButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -18)
+            controlBar.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -18),
+            controlBar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -18),
+            volumeView.widthAnchor.constraint(equalToConstant: 1),
+            volumeView.heightAnchor.constraint(equalToConstant: 1),
+            volumeView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            volumeView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
 
         UIApplication.shared.isIdleTimerDisabled = true
@@ -149,7 +177,7 @@ final class DisplayViewController: UIViewController {
         listener.start(queue: .global())
         self.listener = listener
         listening = true
-        updateControl()
+        updateLinkButton()
     }
 
     private func stopListener() {
@@ -167,7 +195,22 @@ final class DisplayViewController: UIViewController {
             setStatus("正在重新广播…")
             startListener()
         }
-        updateControl()
+        updateLinkButton()
+        showControls()
+    }
+
+    @objc private func toggleAudio() {
+        audioMuted.toggle()
+        UserDefaults.standard.set(audioMuted, forKey: "ipadAudioMuted")
+        audioStateLock.lock()
+        let muted = audioMuted
+        audioStateLock.unlock()
+        audioQueue.async { [weak self] in
+            self?.audioPlayer.volume = muted ? 0 : 1
+        }
+        if !muted { raiseSystemVolume() }
+        updateAudioButton()
+        showControls()
     }
 
     private func dropConnection() {
@@ -181,10 +224,54 @@ final class DisplayViewController: UIViewController {
         stopAudio()
     }
 
-    private func updateControl() {
-        controlButton.setTitle(listening ? "断开" : "重连", for: .normal)
-        controlButton.setTitleColor(listening ? .white : UIColor(red: 0.45, green: 0.85, blue: 1, alpha: 1),
-                                    for: .normal)
+    private func configureControl(_ button: UIButton, action: Selector) {
+        button.setTitleColor(.white, for: .normal)
+        button.titleLabel?.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
+        button.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        button.layer.cornerRadius = 18
+        button.layer.borderWidth = 1
+        button.layer.borderColor = UIColor.white.withAlphaComponent(0.22).cgColor
+        button.contentEdgeInsets = UIEdgeInsets(top: 8, left: 16, bottom: 8, right: 16)
+        button.addTarget(self, action: action, for: .touchUpInside)
+    }
+
+    private func updateAudioButton() {
+        audioButton.setTitle(audioMuted ? "声音 关" : "声音 开", for: .normal)
+        audioButton.setTitleColor(audioMuted ? UIColor.white.withAlphaComponent(0.55) : .white, for: .normal)
+    }
+
+    private func updateLinkButton() {
+        linkButton.setTitle(listening ? "断开" : "重连", for: .normal)
+        linkButton.setTitleColor(listening ? .white : UIColor(red: 0.45, green: 0.85, blue: 1, alpha: 1),
+                                 for: .normal)
+    }
+
+    private func showControls() {
+        fadeWork?.cancel()
+        fadeWork = nil
+        controlsVisible = true
+        controlBar.isUserInteractionEnabled = true
+        if controlBar.alpha < 1 {
+            UIView.animate(withDuration: 0.2) { self.controlBar.alpha = 1 }
+        }
+        guard connection != nil else { return }
+        let work = DispatchWorkItem { [weak self] in self?.hideControls() }
+        fadeWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
+    }
+
+    private func hideControls() {
+        controlsVisible = false
+        controlBar.isUserInteractionEnabled = false
+        UIView.animate(withDuration: 0.6) { self.controlBar.alpha = 0 }
+    }
+
+    private func raiseSystemVolume() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            guard let slider = self.volumeView.subviews.compactMap({ $0 as? UISlider }).first else { return }
+            if slider.value < 0.99 { slider.value = 1 }
+        }
     }
 
     private func accept(_ connection: NWConnection) {
@@ -201,8 +288,11 @@ final class DisplayViewController: UIViewController {
                 switch state {
                 case .ready:
                     self?.setStatus("已连接，等待画面…")
+                    self?.showControls()
                 case .failed, .cancelled:
+                    self?.connection = nil
                     self?.setStatus("连接已断开，等待 Mac 重连…")
+                    self?.showControls()
                 default:
                     break
                 }
@@ -303,6 +393,12 @@ final class DisplayViewController: UIViewController {
             return
         }
 
+        audioStateLock.lock()
+        let muted = audioMuted
+        audioStateLock.unlock()
+        audioPlayer.volume = muted ? 0 : 1
+        if !muted { raiseSystemVolume() }
+
         audioFormat = format
         audioRunning = true
     }
@@ -329,6 +425,10 @@ final class DisplayViewController: UIViewController {
     private func enqueueAudio(_ payload: Data) {
         audioQueue.async { [weak self] in
             guard let self, audioRunning, let format = audioFormat else { return }
+            audioStateLock.lock()
+            let muted = audioMuted
+            audioStateLock.unlock()
+            guard !muted else { return }
             let channelCount = Int(format.channelCount)
             guard channelCount > 0 else { return }
             let frames = payload.count / (channelCount * MemoryLayout<Int16>.size)

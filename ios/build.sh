@@ -14,7 +14,7 @@ clang -c -target arm64-apple-ios12.5 -isysroot "$SDK" -fobjc-arc ExceptionGuard.
 
 swiftc -target arm64-apple-ios12.5 -sdk "$SDK" -O -parse-as-library main.swift "$OUT/ExceptionGuard.o" -o "$APP/iPadDisplay" \
   -import-objc-header Bridging.h \
-  -framework UIKit -framework Network -framework AVFoundation -framework CoreMedia -framework VideoToolbox
+  -framework UIKit -framework Network -framework AVFoundation -framework CoreMedia -framework VideoToolbox -framework MediaPlayer
 
 cp ../assets/ios/*.png "$APP/"
 
@@ -29,8 +29,8 @@ cat > "$APP/Info.plist" <<'PLIST'
     <key>CFBundleName</key><string>iPadDisplay</string>
     <key>CFBundleDisplayName</key><string>iPad 扩展屏</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.0.5</string>
-    <key>CFBundleVersion</key><string>5</string>
+    <key>CFBundleShortVersionString</key><string>1.0.6</string>
+    <key>CFBundleVersion</key><string>6</string>
     <key>NSLocalNetworkUsageDescription</key><string>用于在局域网内被 Mac 发现，把 iPad 作为扩展屏。</string>
     <key>NSBonjourServices</key>
     <array>
