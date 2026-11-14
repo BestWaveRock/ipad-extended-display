@@ -74,7 +74,7 @@ struct ContentView: View {
                 .fill(statusColor)
                 .frame(width: 7, height: 7)
                 .shadow(color: statusColor.opacity(0.8), radius: 4)
-            Text(model.phase.title)
+            Text(model.reconnecting ? "自动重连中" : model.phase.title)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.85))
         }
@@ -85,6 +85,7 @@ struct ContentView: View {
     }
 
     private var statusColor: Color {
+        if model.reconnecting { return Color(red: 0.98, green: 0.78, blue: 0.35) }
         switch model.phase {
         case .streaming: return Color(red: 0.35, green: 0.92, blue: 0.6)
         case .preparing: return Color(red: 0.98, green: 0.78, blue: 0.35)

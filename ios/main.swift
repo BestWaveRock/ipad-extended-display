@@ -29,6 +29,7 @@ final class DisplayViewController: UIViewController {
     private let statusLabel = UILabel()
     private let statusContainer = UIView()
     private let touchView = TouchView()
+    private let controlButton = UIButton(type: .system)
 
     private var listener: NWListener?
     private var connection: NWConnection?
@@ -36,6 +37,7 @@ final class DisplayViewController: UIViewController {
     private var formatDescription: CMVideoFormatDescription?
     private var frameIndex: Int64 = 0
     private var renderedFrames = 0
+    private var listening = false
 
     private let audioEngine = AVAudioEngine()
     private let audioPlayer = AVAudioPlayerNode()
@@ -79,6 +81,18 @@ final class DisplayViewController: UIViewController {
         }
         view.addSubview(touchView)
 
+        controlButton.setTitle("断开", for: .normal)
+        controlButton.setTitleColor(.white, for: .normal)
+        controlButton.titleLabel?.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
+        controlButton.backgroundColor = UIColor.black.withAlphaComponent(0.55)
+        controlButton.layer.cornerRadius = 18
+        controlButton.layer.borderWidth = 1
+        controlButton.layer.borderColor = UIColor.white.withAlphaComponent(0.22).cgColor
+        controlButton.contentEdgeInsets = UIEdgeInsets(top: 8, left: 18, bottom: 8, right: 18)
+        controlButton.translatesAutoresizingMaskIntoConstraints = false
+        controlButton.addTarget(self, action: #selector(toggleLink), for: .touchUpInside)
+        view.addSubview(controlButton)
+
         NSLayoutConstraint.activate([
             statusContainer.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             statusContainer.centerYAnchor.constraint(equalTo: view.centerYAnchor),
@@ -91,7 +105,9 @@ final class DisplayViewController: UIViewController {
             touchView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             touchView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             touchView.topAnchor.constraint(equalTo: view.topAnchor),
-            touchView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            touchView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            controlButton.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -18),
+            controlButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -18)
         ])
 
         UIApplication.shared.isIdleTimerDisabled = true
@@ -119,7 +135,7 @@ final class DisplayViewController: UIViewController {
             DispatchQueue.main.async {
                 switch state {
                 case .ready:
-                    self?.setStatus("等待 Mac 连接…\n已广播 _ipaddisplay._tcp · :12346")
+                    self?.setStatus("等待 Mac 连接…\n已广播 Bonjour · :12346")
                 case .waiting(let error), .failed(let error):
                     self?.setStatus("监听异常: \(error.localizedDescription)")
                 default:
@@ -132,6 +148,43 @@ final class DisplayViewController: UIViewController {
         }
         listener.start(queue: .global())
         self.listener = listener
+        listening = true
+        updateControl()
+    }
+
+    private func stopListener() {
+        listening = false
+        listener?.cancel()
+        listener = nil
+    }
+
+    @objc private func toggleLink() {
+        if listening {
+            dropConnection()
+            stopListener()
+            setStatus("已断开连接\n点右下角「重连」恢复")
+        } else {
+            setStatus("正在重新广播…")
+            startListener()
+        }
+        updateControl()
+    }
+
+    private func dropConnection() {
+        connection?.cancel()
+        connection = nil
+        readBuffer.removeAll()
+        formatDescription = nil
+        frameIndex = 0
+        renderedFrames = 0
+        displayLayer.flushAndRemoveImage()
+        stopAudio()
+    }
+
+    private func updateControl() {
+        controlButton.setTitle(listening ? "断开" : "重连", for: .normal)
+        controlButton.setTitleColor(listening ? .white : UIColor(red: 0.45, green: 0.85, blue: 1, alpha: 1),
+                                    for: .normal)
     }
 
     private func accept(_ connection: NWConnection) {

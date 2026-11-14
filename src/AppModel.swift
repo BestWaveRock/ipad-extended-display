@@ -63,6 +63,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var screenPermission: PermissionState = Permissions.screenRecording
     @Published private(set) var accessibilityPermission: PermissionState = Permissions.accessibility
     @Published private(set) var virtualDisplayReady = false
+    @Published private(set) var reconnecting = false
     @Published private(set) var needsRelaunch = false
     @Published private(set) var permissionTrouble: String?
     @Published private(set) var locationWarning: String?
@@ -74,6 +75,8 @@ final class AppModel: ObservableObject {
     private let wifiDiscovery = WifiDiscovery()
     private var wifiDevices: [WifiDisplay] = []
     private var usbDevices: [DisplayDevice] = []
+    private var reconnectTask: Task<Void, Never>?
+    private var userStopped = false
 
     init() {
         let defaults = UserDefaults.standard
@@ -210,6 +213,8 @@ final class AppModel: ObservableObject {
     }
 
     func start() {
+        userStopped = false
+        cancelReconnect()
         guard let device = selectedDevice else {
             phase = .failed("没有可用设备")
             return
@@ -237,6 +242,7 @@ final class AppModel: ObservableObject {
                 try await runEngine(device: device, display: content, bounds: display.bounds,
                                     captureSize: display.pixelSize)
             } catch {
+                engine = nil
                 phase = .failed(error.localizedDescription)
                 append(error.localizedDescription)
                 if isPermissionError(error.localizedDescription) {
@@ -252,11 +258,52 @@ final class AppModel: ObservableObject {
     }
 
     func stop() {
+        userStopped = true
+        cancelReconnect()
         engine?.stop()
         engine = nil
         phase = .idle
         stats = StreamStats()
         append("已断开连接，虚拟屏幕保留在「显示器」设置中")
+    }
+
+    private func cancelReconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnecting = false
+    }
+
+    private func beginAutoReconnect(device: DisplayDevice) {
+        guard !userStopped, reconnectTask == nil else { return }
+        reconnecting = true
+        append("连接中断，开始自动重连（最多 60 秒）")
+        reconnectTask = Task { [weak self] in
+            for attempt in 1...30 {
+                guard let self, !Task.isCancelled else { return }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled else { return }
+                do {
+                    let display = try ensureVirtualDisplay()
+                    let content = try await shareableDisplay(matching: display.displayID)
+                    try await runEngine(device: device, display: content, bounds: display.bounds,
+                                        captureSize: display.pixelSize)
+                    break
+                } catch {
+                    engine = nil
+                    if attempt % 5 == 0 {
+                        append("重连未成功（\(attempt)/30）：\(error.localizedDescription)")
+                    }
+                    continue
+                }
+            }
+            guard let self else { return }
+            reconnectTask = nil
+            reconnecting = false
+            if phase != .streaming, !userStopped {
+                phase = .failed("自动重连超时，请点开始扩展")
+                append("自动重连超时。确认 iPad 端 App 已点「重连」并停在前台")
+            }
+        }
     }
 
     func dismissPermissionTrouble() {
@@ -375,8 +422,13 @@ final class AppModel: ObservableObject {
         }
         engine.onDisconnect = { [weak self] reason in
             Task { @MainActor in
-                self?.phase = .idle
-                self?.append(reason)
+                guard let self else { return }
+                self.engine?.stop()
+                self.engine = nil
+                self.phase = .idle
+                self.stats = StreamStats()
+                self.append(reason)
+                self.beginAutoReconnect(device: device)
             }
         }
         self.engine = engine
