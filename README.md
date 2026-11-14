@@ -10,6 +10,15 @@
 
 > 想看这条路是怎么试出来的（Sidecar / Duet / kext 各自为什么走不通、两个真坑长什么样）：[docs/story.md](docs/story.md)
 
+## 下载
+
+| 文件 | 说明 |
+| --- | --- |
+| [iPad-Extended-Display-1.0.0.dmg](https://github.com/BestWaveRock/ipad-extended-display/releases/latest/download/iPad-Extended-Display-1.0.0.dmg) | Mac 端应用（macOS 14+） |
+| [iPadDisplay.ipa](https://github.com/BestWaveRock/ipad-extended-display/releases/latest/download/iPadDisplay.ipa) | iPad 端应用（iOS 12+，需自签名） |
+
+都不需要 Homebrew、不需要内核扩展、不需要 BetterDisplay。
+
 ## 特性
 
 - **纯 USB**：走 usbmux 通道，不依赖 Wi-Fi，不受路由器、5GHz、隔墙影响，延迟稳定在个位数毫秒级。
