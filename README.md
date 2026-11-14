@@ -12,10 +12,12 @@
 
 ## 下载
 
+到 [Releases](https://github.com/BestWaveRock/ipad-extended-display/releases/latest) 下载：
+
 | 文件 | 说明 |
 | --- | --- |
-| [iPad-Extended-Display-1.0.0.dmg](https://github.com/BestWaveRock/ipad-extended-display/releases/latest/download/iPad-Extended-Display-1.0.0.dmg) | Mac 端应用（macOS 14+） |
-| [iPadDisplay.ipa](https://github.com/BestWaveRock/ipad-extended-display/releases/latest/download/iPadDisplay.ipa) | iPad 端应用（iOS 12+，需自签名） |
+| `iPad-Extended-Display-<版本>.dmg` | Mac 端应用（macOS 14+，arm64 + x86_64 通用） |
+| `iPadDisplay.ipa` | iPad 端应用（iOS 12+，需自签名） |
 
 都不需要 Homebrew、不需要内核扩展、不需要 BetterDisplay。
 
@@ -99,7 +101,10 @@ USB 2.0 的带宽（理论 60 MB/s）远超 H.264 的需求，所以画面质量
 
 ### 第二步：Mac 端安装
 
-1. 打开 `iPad-Extended-Display-1.0.0.dmg`，把 **iPad 扩展屏** 拖进「应用程序」。
+1. 打开下载到的 `iPad-Extended-Display-<版本>.dmg`，把 **iPad 扩展屏** 拖进「应用程序」。
+
+   > 必须真的拖进「应用程序」再运行。直接在磁盘映像里双击，App 会以随机路径（App Translocation）启动，macOS 的权限记录每次都记不住，表现为“我明明授权了却还说没权限”。应用检测到这种情况会在顶部弹出红色提示。
+
 2. 首次打开会被 Gatekeeper 拦一下（应用是 ad-hoc 签名，没有 Apple 公证）：右键点图标 →「打开」，或到 `系统设置 → 隐私与安全性` 里点「仍要打开」。
 3. 按提示授权两项权限：
    - **屏幕录制**：采集虚拟屏画面必需。授权后需要**退出并重新打开应用**才生效。
@@ -154,7 +159,7 @@ cd mac
 # Mac 应用（生成 build/iPad 扩展屏.app）
 ./src/build-app.sh
 
-# DMG 安装包（生成 dist/iPad-Extended-Display-1.0.0.dmg）
+# DMG 安装包（生成 dist/iPad-Extended-Display-1.0.1.dmg）
 ./package.sh
 
 # iPad 端 IPA（生成 ios/iPadDisplay.ipa）
@@ -162,6 +167,16 @@ cd mac
 ```
 
 构建 IPA 需要 Xcode 命令行工具（`xcode-select --install`），并会把产物复制到 `~/Downloads/iPadDisplay.ipa`。
+
+发布用的 DMG 默认构建 arm64 + x86_64 通用二进制；只想跑本机构建可以 `ARCHS=arm64 ./src/build-app.sh`。
+
+打 tag 时 GitHub Actions 会自动构建并把它挂到对应 Release：
+
+```bash
+git tag v1.0.1 && git push origin v1.0.1
+```
+
+工作流定义在 [.github/workflows/release.yml](.github/workflows/release.yml)。
 
 ## 分辨率与画面比例
 
@@ -193,6 +208,14 @@ iPad Air 1/2、iPad 5/6 代、iPad Pro 9.7 的屏幕都是 **2048×1536（4:3）
 **点「开始扩展」提示缺少屏幕录制权限**
 
 去 `系统设置 → 隐私与安全性 → 屏幕录制` 勾选「iPad 扩展屏」，然后**完全退出应用再打开**。macOS 只在进程启动时检查这个权限。
+
+**系统设置里明明已经打开，应用还是说没有权限**
+
+这是 ad-hoc 签名 + TCC 的老问题，通常有三种成因，应用里都有对应的按钮：
+
+1. **应用没放在「应用程序」里**：直接在 DMG 里双击运行，路径每次不同（App Translocation），授权永远对不上。顶部会出现红色提示「请先安装到「应用程序」」。
+2. **授权后没重启**：屏幕录制权限只在进程启动时读取。授予后应用会自行发现并弹出「权限已生效，需要重启应用」，点「立即重启」即可。
+3. **旧授权记录残留**：每次重新构建（包括换版本）二进制哈希都会变，而 ad-hoc 签名没有稳定的开发者身份，系统里可能留着一条对不上的旧记录，于是“开关是开的但不生效”。点权限卡片里的 **「重置权限」**（内部执行 `tccutil reset ScreenCapture/Accessibility com.loop.ipadextendeddisplay` 并自动重启），重启后再授权一次就好。
 
 **画面很卡 / 掉帧**
 

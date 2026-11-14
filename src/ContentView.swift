@@ -18,6 +18,7 @@ struct ContentView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
                         header
+                        banners
                         deviceCard
                         screenCard
                         permissionCard
@@ -85,6 +86,26 @@ struct ContentView: View {
         case .preparing: return Color(red: 0.98, green: 0.78, blue: 0.35)
         case .failed: return Color(red: 0.98, green: 0.42, blue: 0.42)
         case .idle: return .white.opacity(0.35)
+        }
+    }
+
+    @ViewBuilder
+    private var banners: some View {
+        if let warning = model.locationWarning {
+            BannerView(tone: .danger, icon: "exclamationmark.triangle.fill",
+                       title: "请先安装到「应用程序」", message: warning)
+        }
+        if let trouble = model.permissionTrouble {
+            BannerView(tone: .danger, icon: "lock.trianglebadge.exclamationmark.fill",
+                       title: "权限记录对不上当前版本", message: trouble,
+                       actionTitle: "重置权限并重启",
+                       action: model.repairPermissions)
+        }
+        if model.needsRelaunch {
+            BannerView(tone: .warning, icon: "arrow.clockwise.circle.fill",
+                       title: "权限已生效，需要重启应用", message: "macOS 只在进程启动时读取屏幕录制授权。",
+                       actionTitle: "立即重启",
+                       action: model.relaunch)
         }
     }
 
@@ -236,6 +257,20 @@ struct ContentView: View {
                               detail: "把 iPad 触控变成鼠标点击",
                               state: model.accessibilityPermission,
                               action: model.requestAccessibilityPermission)
+                HStack(spacing: 8) {
+                    Image(systemName: "questionmark.circle")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.3))
+                    Text("已经在系统设置里打开却仍提示没有权限？")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.white.opacity(0.4))
+                    Spacer()
+                    Button("重置权限") {
+                        model.repairPermissions()
+                    }
+                    .buttonStyle(SoftButtonStyle())
+                }
+                .padding(.top, 2)
             }
         }
     }
@@ -386,5 +421,53 @@ private struct SoftButtonStyle: ButtonStyle {
             .padding(.vertical, 5)
             .background(Capsule().fill(.white.opacity(configuration.isPressed ? 0.16 : 0.09)))
             .overlay(Capsule().stroke(.white.opacity(0.12), lineWidth: 1))
+    }
+}
+
+private struct BannerView: View {
+    enum Tone {
+        case warning
+        case danger
+    }
+
+    let tone: Tone
+    let icon: String
+    let title: String
+    let message: String
+    var actionTitle: String?
+    var action: (() -> Void)?
+
+    private var tint: Color {
+        tone == .danger
+            ? Color(red: 0.98, green: 0.42, blue: 0.42)
+            : Color(red: 0.98, green: 0.76, blue: 0.35)
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(tint)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.92))
+                Text(message)
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            if let actionTitle, let action {
+                Button(actionTitle, action: action)
+                    .buttonStyle(SoftButtonStyle())
+            }
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .fill(tint.opacity(0.12)))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .stroke(tint.opacity(0.45), lineWidth: 1))
     }
 }

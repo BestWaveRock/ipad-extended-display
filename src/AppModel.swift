@@ -34,11 +34,23 @@ final class AppModel: ObservableObject {
     @Published private(set) var screenPermission: PermissionState = Permissions.screenRecording
     @Published private(set) var accessibilityPermission: PermissionState = Permissions.accessibility
     @Published private(set) var virtualDisplayReady = false
+    @Published private(set) var needsRelaunch = false
+    @Published private(set) var permissionTrouble: String?
+    @Published private(set) var locationWarning: String?
 
     private var virtualDisplay: VirtualDisplay?
     private var engine: StreamEngine?
     private var scDisplay: SCDisplay?
     private let port: UInt16 = 12346
+
+    init() {
+        let path = Bundle.main.bundlePath
+        if path.hasPrefix("/Volumes/") {
+            locationWarning = "正在从磁盘映像里运行。请先把「iPad 扩展屏」拖到「应用程序」再打开，否则每次启动路径都不同，系统权限永远记不住。"
+        } else if path.contains("/AppTranslocation/") {
+            locationWarning = "应用正在被 Gatekeeper 随机路径运行，系统权限无法保存。请把 App 拖到「应用程序」后重新打开。"
+        }
+    }
 
     var selectedDevice: MuxDevice? {
         devices.first { $0.udid == selectedDeviceUDID }
@@ -49,8 +61,39 @@ final class AppModel: ObservableObject {
     }
 
     func refreshPermissions() {
+        let previous = screenPermission
         screenPermission = Permissions.screenRecording
         accessibilityPermission = Permissions.accessibility
+        if previous != .granted, screenPermission == .granted {
+            needsRelaunch = true
+            append("屏幕录制权限已生效，需要重启应用才能采集画面")
+        }
+    }
+
+    func relaunch() {
+        let path = Bundle.main.bundlePath
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "sleep 1; /usr/bin/open -n \"\(path)\""]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            NSApp.terminate(nil)
+        }
+    }
+
+    func repairPermissions() {
+        append("正在重置本应用的权限记录…")
+        let screen = Permissions.resetScreenRecording()
+        let accessibility = Permissions.resetAccessibility()
+        append(screen && accessibility
+               ? "已重置屏幕录制与辅助功能授权，重启后请重新授权"
+               : "重置未完全成功，请到系统设置里手动删除本应用条目再重新添加")
+        screenPermission = Permissions.screenRecording
+        accessibilityPermission = Permissions.accessibility
+        permissionTrouble = nil
+        relaunch()
     }
 
     func requestScreenPermission() {
@@ -115,8 +158,16 @@ final class AppModel: ObservableObject {
             } catch {
                 phase = .failed(error.localizedDescription)
                 append(error.localizedDescription)
+                if isPermissionError(error.localizedDescription) {
+                    permissionTrouble = "系统里可能显示已授权，但旧授权记录对不上当前版本（ad-hoc 签名每次构建都会变）。点下面的按钮重置后重启即可。"
+                }
             }
         }
+    }
+
+    private func isPermissionError(_ text: String) -> Bool {
+        let markers = ["3801", "declined", "TCC", "not authorized", "无权限", "拒绝", "屏幕录制"]
+        return markers.contains { text.localizedCaseInsensitiveContains($0) }
     }
 
     func stop() {
@@ -125,6 +176,10 @@ final class AppModel: ObservableObject {
         phase = .idle
         stats = StreamStats()
         append("已断开连接，虚拟屏幕保留在「显示器」设置中")
+    }
+
+    func dismissPermissionTrouble() {
+        permissionTrouble = nil
     }
 
     func applyPreset(_ preset: DisplayPreset) {
