@@ -3,6 +3,23 @@ import CoreGraphics
 import Foundation
 import ScreenCaptureKit
 
+struct DisplayDevice: Identifiable, Hashable {
+    enum Transport: String {
+        case usb = "USB"
+        case wifi = "Wi-Fi"
+    }
+
+    let id: String
+    let name: String
+    let detail: String
+    let transport: Transport
+    let usbDeviceID: Int?
+    let host: String?
+    let port: UInt16
+
+    var isUSB: Bool { transport == .usb }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     enum Phase: Equatable {
@@ -24,11 +41,22 @@ final class AppModel: ObservableObject {
     }
 
     @Published private(set) var phase: Phase = .idle
-    @Published private(set) var devices: [MuxDevice] = []
-    @Published var selectedDeviceUDID: String?
+    @Published private(set) var devices: [DisplayDevice] = []
+    @Published var selectedDeviceID: String?
     @Published var preset: DisplayPreset = DisplayPreset.all[0]
     @Published var refreshRate: Double = 60
     @Published var bitrateMbps: Int = 12
+    @Published var audioEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(audioEnabled, forKey: "audioEnabled")
+            guard audioEnabled != oldValue else { return }
+            append(audioEnabled ? "已开启音频透传" : "已关闭音频透传（声音留在 Mac）")
+            if phase == .streaming { restartStream() }
+        }
+    }
+    @Published var runInBackground: Bool {
+        didSet { UserDefaults.standard.set(runInBackground, forKey: "runInBackground") }
+    }
     @Published private(set) var stats = StreamStats()
     @Published private(set) var logs: [String] = []
     @Published private(set) var screenPermission: PermissionState = Permissions.screenRecording
@@ -42,18 +70,33 @@ final class AppModel: ObservableObject {
     private var engine: StreamEngine?
     private var scDisplay: SCDisplay?
     private let port: UInt16 = 12346
+    private let wifiDiscovery = WifiDiscovery()
+    private var wifiDevices: [WifiDisplay] = []
+    private var usbDevices: [DisplayDevice] = []
 
     init() {
+        let defaults = UserDefaults.standard
+        defaults.register(defaults: ["runInBackground": true, "audioEnabled": false])
+        audioEnabled = defaults.bool(forKey: "audioEnabled")
+        runInBackground = defaults.bool(forKey: "runInBackground")
+
         let path = Bundle.main.bundlePath
         if path.hasPrefix("/Volumes/") {
             locationWarning = "正在从磁盘映像里运行。请先把「iPad 扩展屏」拖到「应用程序」再打开，否则每次启动路径都不同，系统权限永远记不住。"
         } else if path.contains("/AppTranslocation/") {
             locationWarning = "应用正在被 Gatekeeper 随机路径运行，系统权限无法保存。请把 App 拖到「应用程序」后重新打开。"
         }
+
+        wifiDiscovery.onChange = { [weak self] found in
+            Task { @MainActor in
+                self?.wifiDevices = found
+                self?.rebuildDeviceList()
+            }
+        }
     }
 
-    var selectedDevice: MuxDevice? {
-        devices.first { $0.udid == selectedDeviceUDID }
+    var selectedDevice: DisplayDevice? {
+        devices.first { $0.id == selectedDeviceID }
     }
 
     var canStart: Bool {
@@ -108,7 +151,12 @@ final class AppModel: ObservableObject {
         refreshPermissions()
     }
 
+    func startDiscovery() {
+        wifiDiscovery.start()
+    }
+
     func refreshDevices() {
+        var usb: [DisplayDevice] = []
         do {
             let merged = try Usbmux.listDevices()
             var byUDID: [String: MuxDevice] = [:]
@@ -116,18 +164,39 @@ final class AppModel: ObservableObject {
                 if let existing = byUDID[device.udid], existing.isUSB, !device.isUSB { continue }
                 byUDID[device.udid] = device
             }
-            let found = byUDID.values.sorted { lhs, rhs in
-                if lhs.isUSB != rhs.isUSB { return lhs.isUSB }
-                return lhs.udid < rhs.udid
+            usb = byUDID.values.filter { $0.isUSB }.map { device in
+                DisplayDevice(id: "usb-" + device.udid,
+                              name: device.model ?? "iPad",
+                              detail: device.shortUDID,
+                              transport: .usb,
+                              usbDeviceID: device.deviceID,
+                              host: nil,
+                              port: port)
             }
-            devices = found
-            if selectedDeviceUDID == nil || !found.contains(where: { $0.udid == selectedDeviceUDID }) {
-                selectedDeviceUDID = found.first(where: { $0.isUSB })?.udid ?? found.first?.udid
-            }
-            append("发现 \(found.count) 台设备" + (found.isEmpty ? "，请用 USB 连接 iPad" : ""))
         } catch {
-            devices = []
-            append("设备列表读取失败：\(error.localizedDescription)")
+            append("USB 设备列表读取失败：\(error.localizedDescription)")
+        }
+        usbDevices = usb
+        rebuildDeviceList()
+    }
+
+    private func rebuildDeviceList() {
+        let wifi = wifiDevices.map { display in
+            DisplayDevice(id: "wifi-" + display.name,
+                          name: display.name,
+                          detail: "\(display.host):\(display.port)",
+                          transport: .wifi,
+                          usbDeviceID: nil,
+                          host: display.host,
+                          port: UInt16(display.port))
+        }
+        let merged = usbDevices + wifi
+        devices = merged
+        if selectedDeviceID == nil || !merged.contains(where: { $0.id == selectedDeviceID }) {
+            selectedDeviceID = merged.first(where: { $0.isUSB })?.id ?? merged.first?.id
+        }
+        if !merged.isEmpty {
+            append("发现 \(merged.count) 台设备：" + merged.map { "\($0.name)(\($0.transport.rawValue))" }.joined(separator: "、"))
         }
     }
 
@@ -147,7 +216,7 @@ final class AppModel: ObservableObject {
             append("提醒：未授予辅助功能权限，画面能看但触控无效")
         }
         phase = .preparing
-        append("连接 \(device.displayName) …")
+        append("连接 \(device.name) · \(device.transport.rawValue) …")
 
         Task {
             do {
@@ -264,11 +333,17 @@ final class AppModel: ObservableObject {
         throw StreamEngineError.capture("虚拟屏幕不可用")
     }
 
-    private func runEngine(device: MuxDevice, display: SCDisplay, bounds: CGRect,
+    private func runEngine(device: DisplayDevice, display: SCDisplay, bounds: CGRect,
                            captureSize: CGSize) async throws {
         let fd: Int32
         do {
-            fd = try Usbmux.connect(deviceID: device.deviceID, port: port)
+            if let host = device.host {
+                fd = try Usbmux.connect(host: host, port: device.port)
+            } else if let deviceID = device.usbDeviceID {
+                fd = try Usbmux.connect(deviceID: deviceID, port: device.port)
+            } else {
+                throw StreamEngineError.tunnel("设备信息不完整")
+            }
         } catch {
             throw StreamEngineError.tunnel(error.localizedDescription)
         }
@@ -295,6 +370,7 @@ final class AppModel: ObservableObject {
         self.engine = engine
         try await engine.start(tunnelFD: fd,
                                display: display, displayBounds: bounds, captureSize: captureSize,
+                               audio: audioEnabled,
                                fps: Int(refreshRate), bitrate: bitrateMbps * 1_000_000)
         phase = .streaming
         append("画面已推送到 iPad，可直接用 iPad 触摸操作")

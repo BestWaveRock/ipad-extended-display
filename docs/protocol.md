@@ -1,6 +1,6 @@
 # 传输协议
 
-Mac 与 iPad 之间是一条**裸 TCP 流**（经 usbmux 隧道），双方都在上面跑同一套自定义分帧协议。
+Mac 与 iPad 之间是一条**裸 TCP 流**（USB 走 usbmux 隧道，Wi‑Fi 直接连 iPad 的局域网地址），双方都在上面跑同一套自定义分帧协议。
 协议刻意做得很小：一个 8 字节头 + 定长负载，没有握手、没有重传，靠 TCP 自己保证顺序。
 
 ## 分帧格式
@@ -27,6 +27,8 @@ Mac 与 iPad 之间是一条**裸 TCP 流**（经 usbmux 隧道），双方都�
 | `1` | `config` | Mac → iPad | H.264 参数集（SPS/PPS）与画面尺寸 |
 | `2` | `videoFrame` | Mac → iPad | 一个 AVCC 格式的访问单元（4 字节长度前缀的 NAL） |
 | `3` | `touch` | iPad → Mac | 触控事件 |
+| `4` | `audioConfig` | Mac → iPad | 音频格式协商（采样率 / 声道 / 位深） |
+| `5` | `audioFrame` | Mac → iPad | 一帧裸 PCM 数据 |
 
 ## config（type = 1）
 
@@ -69,6 +71,34 @@ point = (bounds.origin.x + x * bounds.width,
 
 **注意**：坐标是相对 iPad 整个屏幕归一化的，不是相对视频画面内容。如果虚拟屏比例和 iPad 屏幕比例不一致导致画面出现黑边，边缘区域的点击会有偏移。默认的 4:3 预设不存在这个问题。
 
+## audioConfig（type = 4）
+
+开启"音频透传"后，Mac 在建立隧道时先发一包，iPad 收到后建 `AVAudioEngine` 播放链路。
+
+```
+uint32 sampleRate  采样率，大端（当前固定 48000）
+uint16 channels    声道数，大端（当前固定 2）
+uint16 bits        位深，大端（当前固定 16）
+```
+
+负载固定 8 字节。Mac 端在每次推流开始（包括切分辨率、切刷新率导致的重连）都会重发一次。
+
+## audioFrame（type = 5）
+
+负载是**裸 PCM**：交错立体声、16 bit 有符号、小端、48 kHz，没有包头也没有时间戳。
+
+```
+int16 left, int16 right, int16 left, int16 right, …
+```
+
+iPad 侧按 `audioConfig` 声明的格式建 `AVAudioPCMBuffer` 直接 `scheduleBuffer` 播放；采样率固定，所以不需要重采样。
+
+数据源是 `ScreenCaptureKit` 的 `.audio` 输出（`capturesAudio = true`、`sampleRate = 48000`、`channelCount = 2`）。Mac 端把 `Float32`（planar 或 interleaved 都支持）削顶到 ±1 后线性映射成 `Int16`，因此链路里没有任何压缩，音质等于系统音源。
+
+Mac 端默认 `excludesCurrentProcessAudio = true`，只排掉本应用自己的声音，其它 App 的声音都会被采集。
+
+带宽开销约 192 KB/s（48000 × 2 声道 × 2 字节），相对于 H.264 视频流很小；USB 2.0 和普通 5 GHz Wi‑Fi 都无压力。
+
 ## 连接建立
 
 Mac 侧不监听端口，它主动"打洞"：
@@ -81,6 +111,14 @@ Mac 侧不监听端口，它主动"打洞"：
 5. iPad 端 `NWListener` 监听 `12346`，接受连接后开始等 `config` 包。
 
 iPad 每次重连会 `cancel()` 掉旧连接、清空解码器，所以 Mac 侧断开重连是安全的。
+
+Wi‑Fi 走的是完全相同的分帧协议，只是第一条隧道换成普通 TCP：
+
+1. iPad 端 `NWListener` 启动时把自己注册成 Bonjour 服务 `_ipaddisplay._tcp`（名字就是设备名）。
+2. Mac 端用 `NetServiceBrowser` 搜 `_ipaddisplay._tcp.`，解析出 `hostName` + `port`。
+3. Mac 直接 `connect()` 到该地址，之后就是同一条裸 TCP 流，包格式一字不差。
+
+所以 Wi‑Fi 模式不需要额外的中继或转发进程，`usbmuxd` 也完全不参与。
 
 ## 端口
 

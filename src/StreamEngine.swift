@@ -10,6 +10,8 @@ enum MessageType: UInt8 {
     case config = 1
     case videoFrame = 2
     case touch = 3
+    case audioConfig = 4
+    case audioFrame = 5
 }
 
 struct StreamStats {
@@ -18,6 +20,7 @@ struct StreamStats {
     var frames: Int = 0
     var touches: Int = 0
     var dropped: Int = 0
+    var audioBytes: Int = 0
     var encodedWidth: Int = 0
     var encodedHeight: Int = 0
 }
@@ -56,6 +59,8 @@ final class StreamEngine: NSObject {
     private var droppedFrames = 0
     private var captureWidth = 0
     private var captureHeight = 0
+    private var audioEnabled = false
+    private var sentAudioConfig = false
     private let stateLock = NSLock()
     private var pendingWrites = 0
 
@@ -68,15 +73,19 @@ final class StreamEngine: NSObject {
     private(set) var fps = 30
 
     func start(tunnelFD: Int32, display: SCDisplay, displayBounds: CGRect,
-               captureSize: CGSize, fps: Int, bitrate: Int) async throws {
+               captureSize: CGSize, audio: Bool, fps: Int, bitrate: Int) async throws {
         isRunning = true
         self.fps = fps
         self.bitrate = bitrate
         self.targetDisplay = display
         self.displayBounds = displayBounds
+        audioEnabled = audio
         tunnel = tunnelFD
         onLog?("隧道已建立 (fd \(tunnelFD))")
 
+        if audio {
+            sendAudioConfiguration()
+        }
         try await startCapture(display: display, size: captureSize)
         startReading()
         startStats()
@@ -84,6 +93,8 @@ final class StreamEngine: NSObject {
 
     func stop() {
         isRunning = false
+        audioEnabled = false
+        sentAudioConfig = false
         if let stream = captureStream {
             Task { try? await stream.stopCapture() }
         }
@@ -149,11 +160,18 @@ final class StreamEngine: NSObject {
         configuration.showsCursor = true
         configuration.scalesToFit = true
         configuration.preservesAspectRatio = true
+        configuration.capturesAudio = audioEnabled
+        configuration.sampleRate = 48_000
+        configuration.channelCount = 2
+        configuration.excludesCurrentProcessAudio = true
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
         do {
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
+            if audioEnabled {
+                try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: captureQueue)
+            }
             try await stream.startCapture()
         } catch {
             throw StreamEngineError.capture("屏幕采集失败：\(error.localizedDescription)。请在系统设置中允许「屏幕录制」。")
@@ -163,6 +181,9 @@ final class StreamEngine: NSObject {
         stats.encodedWidth = width
         stats.encodedHeight = height
         onLog?("开始采集 \(width)×\(height) @\(fps)fps")
+        if audioEnabled {
+            onLog?("音频透传已开启（48kHz 立体声）")
+        }
     }
 
     private func createEncoder(width: Int, height: Int) {
@@ -351,10 +372,84 @@ final class StreamEngine: NSObject {
         frameCounter += 1
         byteCounter += length
     }
+
+    private func sendAudioConfiguration() {
+        var payload = Data()
+        var sampleRate = UInt32(48_000).bigEndian
+        var channels = UInt16(2).bigEndian
+        var bits = UInt16(16).bigEndian
+        withUnsafeBytes(of: &sampleRate) { payload.append(contentsOf: $0) }
+        withUnsafeBytes(of: &channels) { payload.append(contentsOf: $0) }
+        withUnsafeBytes(of: &bits) { payload.append(contentsOf: $0) }
+        send(.audioConfig, payload: payload)
+        sentAudioConfig = true
+    }
+
+    fileprivate func handleAudio(sampleBuffer: CMSampleBuffer) {
+        guard audioEnabled,
+              let format = CMSampleBufferGetFormatDescription(sampleBuffer),
+              let description = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee else { return }
+
+        let frames = CMSampleBufferGetNumSamples(sampleBuffer)
+        let channelCount = Int(description.mChannelsPerFrame)
+        guard frames > 0, channelCount > 0 else { return }
+
+        let list = AudioBufferList.allocate(maximumBuffers: channelCount)
+        defer { free(list.unsafeMutablePointer) }
+        var blockBuffer: CMBlockBuffer?
+        let status = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+            sampleBuffer,
+            bufferListSizeNeededOut: nil,
+            bufferListOut: list.unsafeMutablePointer,
+            bufferListSize: AudioBufferList.sizeInBytes(maximumBuffers: channelCount),
+            blockBufferAllocator: nil,
+            blockBufferMemoryAllocator: nil,
+            flags: 0,
+            blockBufferOut: &blockBuffer
+        )
+        guard status == noErr else { return }
+
+        let isFloat = description.mFormatFlags & kAudioFormatFlagIsFloat != 0
+        let isPlanar = description.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
+        guard isFloat else { return }
+
+        var output = [Int16](repeating: 0, count: frames * channelCount)
+        if isPlanar {
+            let sourceChannels = min(channelCount, list.count)
+            guard sourceChannels > 0 else { return }
+            for channel in 0..<sourceChannels {
+                guard let data = list[channel].mData else { continue }
+                let samples = data.assumingMemoryBound(to: Float.self)
+                for frame in 0..<frames {
+                    let value = max(-1, min(1, samples[frame]))
+                    output[frame * channelCount + channel] = Int16(value * 32_767)
+                }
+            }
+        } else if let data = list[0].mData {
+            let available = Int(list[0].mDataByteSize) / MemoryLayout<Float>.size
+            let samples = data.assumingMemoryBound(to: Float.self)
+            for index in 0..<min(available, output.count) {
+                let value = max(-1, min(1, samples[index]))
+                output[index] = Int16(value * 32_767)
+            }
+        }
+
+        if !sentAudioConfig { sendAudioConfiguration() }
+        let payload = output.withUnsafeBufferPointer { Data(buffer: $0) }
+        send(.audioFrame, payload: payload)
+
+        stateLock.lock()
+        stats.audioBytes += payload.count
+        stateLock.unlock()
+    }
 }
 
 extension StreamEngine: SCStreamOutput {
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        if type == .audio {
+            handleAudio(sampleBuffer: sampleBuffer)
+            return
+        }
         guard type == .screen, sampleBuffer.isValid,
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
               let session = compressionSession else { return }

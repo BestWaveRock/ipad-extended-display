@@ -1,12 +1,12 @@
 # iPad 扩展屏 · iPad Extended Display
 
-把一台跑不动 Sidecar 的老 iPad（甚至 iOS 12）变成 Mac 的第二块屏幕：**纯 USB 有线传输、4:3 原生比例、H.264 硬解上屏、触控反向回传**。
+把一台跑不动 Sidecar 的老 iPad（甚至 iOS 12）变成 Mac 的第二块屏幕：**USB 有线或 Wi‑Fi 局域网、4:3 原生比例、H.264 硬解上屏、触控反向回传、可选音频透传**。
 
 ![应用截图](docs/screenshot.png)
 
 这个项目一开始只是想验证一件事：一台 iOS 12.5.8 的 iPad Air 1，官方 Sidecar 不支持、Duet 新版要 iOS 13、Splashtop XDisplay 又依赖已废弃的内核扩展，那它到底还能不能当副屏？
 
-结论是能，而且不需要装任何驱动或内核扩展：自签名 App 在 iPad 上监听一个端口，Mac 通过 usbmux（就是 iTunes / Xcode 用来跟设备通信的那条 USB 通道）打洞进去，把屏幕画面用 H.264 推过去，iPad 用 `AVSampleBufferDisplayLayer` 硬解显示。
+结论是能，而且不需要装任何驱动或内核扩展：自签名 App 在 iPad 上监听一个端口并广播 Bonjour，Mac 通过 usbmux（就是 iTunes / Xcode 用来跟设备通信的那条 USB 通道）打洞进去，或者直接连局域网地址，把屏幕画面用 H.264 推过去，iPad 用 `AVSampleBufferDisplayLayer` 硬解显示。
 
 > 想看这条路是怎么试出来的（Sidecar / Duet / kext 各自为什么走不通、两个真坑长什么样）：[docs/story.md](docs/story.md)
 
@@ -23,12 +23,14 @@
 
 ## 特性
 
-- **纯 USB**：走 usbmux 通道，不依赖 Wi-Fi，不受路由器、5GHz、隔墙影响，延迟稳定在个位数毫秒级。
+- **双通道**：USB 走 usbmux 通道，不依赖 Wi-Fi，不受路由器、5 GHz、隔墙影响，延迟稳定在个位数毫秒级；不想插线时切 Wi‑Fi，同一局域网内自动发现、自动连接。
 - **原样 4:3**：iPad Air 原生 2048×1536，虚拟屏按 4:3 建，画面点对点没有黑边、没有拉伸。
 - **不装驱动**：不需要内核扩展（kext），不需要关闭 SIP，不需要改系统文件。
 - **自带虚拟屏**：应用内直接创建虚拟显示器（`CGVirtualDisplay`），不再需要 BetterDisplay 之类的第三方工具。
 - **零依赖**：自己实现了 usbmux 协议客户端，不需要 `iproxy`、不需要 `libimobiledevice`、不需要 Homebrew。
 - **触控回传**：在 iPad 上点、拖、滑，Mac 上就是对应的鼠标事件，可以直接操作副屏窗口。
+- **音频透传**（可选）：一个开关就能把 Mac 的系统声音一起推到 iPad，关掉则声音留在 Mac，互不干扰。
+- **后台常驻**：关掉窗口不等于退出，推流不中断；菜单栏图标随时断开或重新打开窗口。
 - **可调参数**：4 档分辨率、30/60Hz 刷新率、8/12/20 Mbps 码率，运行中可实时切换。
 - **命令行版本**：附带同引擎的 CLI，方便脚本化或排障。
 
@@ -44,30 +46,38 @@
 
 USB 2.0 的带宽（理论 60 MB/s）远超 H.264 的需求，所以画面质量主要取决于 iPad 的硬解能力和码率设置，而不是链路。
 
+同一张表在 Wi‑Fi 下也能达到，前提是 Mac 和 iPad 在同一台 5 GHz 路由器下、信号良好。开了音频透传再加约 192 KB/s（未压缩 PCM），依然远低于 5 GHz 的实际带宽。
+
 ## 工作原理
 
-```
-┌──────────────────────── Mac ────────────────────────┐       ┌────── iPad ──────┐
-│                                                     │       │                  │
-│  CGVirtualDisplay ──► ScreenCaptureKit ──► VideoToolbox │       │                  │
-│  （创建 2048×1536      （采集像素缓冲）      （H.264 硬编）│       │                  │
-│    虚拟显示器）                                      │       │                  │
-│         ▲                                  │        │       │                  │
-│         │ 鼠标事件                          ▼        │       │                  │
-│  CGEvent.post ◄──── 触控包 ◄──── usbmuxd 隧道 ◄──────┼──USB──┼─► NWListener     │
-│                                                     │       │    :12346        │
-│                                                     │       │       │          │
-│                                                     │       │       ▼          │
-│                                                     │       │  AVSampleBuffer  │
-│                                                     │       │  DisplayLayer    │
-└─────────────────────────────────────────────────────┘       └──────────────────┘
+```mermaid
+flowchart LR
+    subgraph Mac["Mac"]
+        VD["CGVirtualDisplay<br/>虚拟屏 2048×1536"] --> SC["ScreenCaptureKit<br/>采集像素缓冲"]
+        SC --> VTD["VideoToolbox<br/>H.264 硬编"]
+        VTD --> TUN["TCP 隧道"]
+        EV["CGEvent.post<br/>鼠标事件"] --> VD
+    end
+    subgraph IPAD["iPad"]
+        NL["NWListener :12346<br/>+ Bonjour 广播"] --> LAYER["AVSampleBufferDisplayLayer<br/>H.264 硬解上屏"]
+        NL --> AE["AVAudioEngine<br/>音频播放"]
+        TV["TouchView<br/>触控采集"] --> TS["触控包"]
+    end
+    TUN -->|"USB：usbmux 打洞<br/>Wi-Fi：局域网直连"| NL
+    NL -->|"触控事件"| EV
 ```
 
 三段链路：
 
 1. **虚拟显示器**：Mac 端用私有类 `CGVirtualDisplay` 在系统里注册一块 2048×1536 的虚拟屏，系统把它当成真的外接显示器，窗口可以拖过去。
 2. **采集与编码**：`ScreenCaptureKit` 按虚拟屏 ID 采集像素，`VideoToolbox` 实时编成 H.264（Baseline/Main，无 B 帧，低延迟）。
-3. **USB 传输**：Mac 直接连 `usbmuxd` 的 Unix socket，用 plist 协议请求「连接到设备 12346 端口」，之后这条 socket 就是一条裸 TCP 隧道；iPad 端用 `NWListener` 监听同一端口，收到包后用 `AVSampleBufferDisplayLayer` 硬解显示。
+3. **传输**：两条路，同一种包格式。
+   - **USB**：Mac 直接连 `usbmuxd` 的 Unix socket，用 plist 协议请求「连接到设备 12346 端口」，之后这条 socket 就是一条裸 TCP 隧道。
+   - **Wi‑Fi**：iPad 端 `NWListener` 注册 Bonjour 服务 `_ipaddisplay._tcp`，Mac 端用 `NetServiceBrowser` 发现后直接连局域网地址。
+
+   iPad 端始终是 `NWListener` + `AVSampleBufferDisplayLayer`，收到包后硬解显示，两条路对它没有区别。
+
+音频同理：开关打开后 `ScreenCaptureKit` 多输出一路 `.audio`，Mac 转成 48 kHz / 16 bit / 立体声裸 PCM 走同一条隧道，iPad 用 `AVAudioEngine` 播放。
 
 触控走反方向：`UIGestureRecognizer` 级别的 `touchesBegan/Moved/Ended` → 归一化坐标 → 同一个隧道回传 → Mac 用 `CGEvent` 投递鼠标事件到虚拟屏坐标。
 
@@ -79,7 +89,7 @@ USB 2.0 的带宽（理论 60 MB/s）远超 H.264 的需求，所以画面质量
 | --- | --- |
 | Mac | macOS 14 或更新（`CGVirtualDisplay` / ScreenCaptureKit 需要），Apple Silicon 或 Intel |
 | iPad | iOS 12 或更新（iPad Air 1 / iPad 5 / 6 代等 4:3 机型效果最好） |
-| 连接 | Lightning 或 USB-C 数据线（能传数据的线，不是纯充电线） |
+| 连接 | USB：Lightning 或 USB-C **数据线**（不是纯充电线）；Wi‑Fi：Mac 与 iPad 在同一局域网 |
 
 ## 快速开始
 
@@ -97,7 +107,7 @@ USB 2.0 的带宽（理论 60 MB/s）远超 H.264 的需求，所以画面质量
 
 > **关于 iLoader**：它是一个 iOS 侧载（sideload）工具，作用是拿你的 Apple ID 给 IPA 重新签名，让系统允许安装非 App Store 应用。免费 Apple ID 签出来的证书 **7 天过期**，过期后 App 打不开，回到 iLoader 重新签一次即可（数据不会丢）。这也是为什么本项目必须开源：你随时可以自己重新打包、重新签名。
 
-打开 App 后它会长这样：黑屏 + 一行 `等待 Mac 连接…(listening :12346)`。**请保持 App 在前台、不要锁屏**（iOS 12 会在切后台时挂起进程，画面会中断，回到前台会自动恢复）。
+打开 App 后它会长这样：黑屏 + 一行 `等待 Mac 连接…已广播 _ipaddisplay._tcp · :12346`。**请保持 App 在前台、不要锁屏**（iOS 12 会在切后台时挂起进程，画面会中断，回到前台会自动恢复）。
 
 ### 第二步：Mac 端安装
 
@@ -109,16 +119,23 @@ USB 2.0 的带宽（理论 60 MB/s）远超 H.264 的需求，所以画面质量
 3. 按提示授权两项权限：
    - **屏幕录制**：采集虚拟屏画面必需。授权后需要**退出并重新打开应用**才生效。
    - **辅助功能**：把 iPad 上的触控变成 Mac 上的鼠标点击。不授权也能看画面，但点不动。
+   - **本地网络**（macOS 15 及以上，走 Wi‑Fi 时才会弹）：允许应用在局域网里发现 iPad。
 4. 用数据线连接 iPad，iPad 上点「信任」。
 5. 应用里点「刷新设备」，选中你的 iPad，点「开始扩展」。
 
 成功后系统会多出一块显示器，把窗口往那个方向拖就行。iPad 上会立刻出现画面。
+
+不插线也能用：让 iPad 和 Mac 连同一个 Wi‑Fi，iPad 端 App 打开并停在前台，Mac 端点「搜索 Wi‑Fi」，几秒后设备列表里会出现一台标着 `Wi-Fi` 的 iPad，名字就是 iPad 的设备名。选中它点「开始扩展」即可。
+
+> USB 和 Wi‑Fi 可以同时出现在列表里，随时切换。同一个局域网建议走 5 GHz；2.4 GHz 或信号差的时候，画面会明显比 USB 抖。
 
 ### 第三步：调整
 
 - **分辨率**：`1024×768` 是推荐值——虚拟屏以 2 倍渲染，实际像素 2048×1536，正好是 iPad Air 的原生分辨率，字大且清晰。想要更大桌面就选 `2048×1536`（1:1 像素，但字会很小）。
 - **刷新率**：30Hz 更省电、更省带宽；60Hz 更跟手。运行中切换会自动重连。
 - **码率**：8 Mbps 适合看文档，20 Mbps 适合看视频/图片。
+- **音频透传**：打开后 Mac 的系统声音（视频、音乐、会议）会一起送到 iPad 播放；关掉则声音留在 Mac。运行中切换会自动重连一次。注意音源是系统混音，不是单个 App，所以无法做到「只把某个 App 的声音送过去」。
+- **后台常驻**：「关闭窗口后继续运行」打开时，点红叉只是把窗口收起来，推流不中断，可以从菜单栏图标重新打开窗口、断开或退出。默认开启。
 
 ## 命令行版本
 
@@ -159,7 +176,7 @@ cd mac
 # Mac 应用（生成 build/iPad 扩展屏.app）
 ./src/build-app.sh
 
-# DMG 安装包（生成 dist/iPad-Extended-Display-1.0.1.dmg）
+# DMG 安装包（生成 dist/iPad-Extended-Display-1.0.2.dmg）
 ./package.sh
 
 # iPad 端 IPA（生成 ios/iPadDisplay.ipa）
@@ -173,7 +190,7 @@ cd mac
 打 tag 时 GitHub Actions 会自动构建并把它挂到对应 Release：
 
 ```bash
-git tag v1.0.1 && git push origin v1.0.1
+git tag v1.0.2 && git push origin v1.0.2
 ```
 
 工作流定义在 [.github/workflows/release.yml](.github/workflows/release.yml)。
@@ -200,6 +217,14 @@ iPad Air 1/2、iPad 5/6 代、iPad Pro 9.7 的屏幕都是 **2048×1536（4:3）
 **iPad 上一直显示「等待 Mac 连接」**
 
 先确认数据线能传数据（换一根线试试），iPad 上要点「信任此电脑」。然后在应用里点「刷新设备」，确认设备标签是 `USB` 而不是「网络」。如果 iPad App 被切到后台或锁屏，它会停止监听，重新打开即可。
+
+**点「搜索 Wi‑Fi」搜不到 iPad**
+
+四个前提：iPad 端 App 打开且在前台、两台机器连的是同一个 Wi‑Fi、路由器没开 AP 隔离（公司/酒店网络常见）、iPad 没开飞行模式。还是搜不到就把两台机器都连到同一个手机热点试一次，能搜到就说明是路由器屏蔽了 Bonjour 组播。
+
+**有画面但 iPad 没声音**
+
+先确认「音频透传」是打开的（打开后会自动重连一次，日志里会出现「音频透传已开启」），再检查 iPad 的侧边静音键/音量，以及 App 是否在前台。iPad 端只在推流开始时收到一次音频格式，之后按 48 kHz 立体声播放。
 
 **有画面但点不动**
 
@@ -238,11 +263,28 @@ iPad Air 1/2、iPad 5/6 代、iPad Pro 9.7 的屏幕都是 **2048×1536（4:3）
 ## 已知限制
 
 - iPad 端 App 必须在前台，iOS 12 不支持后台保持网络监听。
-- 只推画面和触控：键盘输入、剪贴板同步、Apple Pencil 压感、音频回传都还没做。
+- 推画面、触控和可选的系统音频：键盘输入、剪贴板同步、Apple Pencil 压感还没做。
+- Wi‑Fi 模式依赖局域网质量：同一台 5 GHz 路由器下通常很跟手，2.4 GHz、隔墙或公共 Wi‑Fi 会明显变差（USB 模式下延迟是个位数毫秒）。链路不做丢包重传，靠 TCP 自己扛。
+- Wi‑Fi 发现依赖 Bonjour（`_ipaddisplay._tcp`）。公司网络、酒店 Wi‑Fi 常有 AP 隔离或组播屏蔽，这种情况下发现不到设备，改回 USB 或自己搭热点即可。
 - 虚拟屏切换分辨率偶尔会被系统拒绝一次（`CGErrorFailure`），代码里做了重试，极少数情况下需要再点一次。
 - 触控坐标按整屏归一化映射；当 iPad 上的画面有黑边（分辨率比例不是 4:3）时，边缘区域会有偏移。
 - ad-hoc 签名 + 无公证：首次启动需要右键打开，且每次重新构建后 TCC 权限可能需要重新授权。
 - 未在 Intel Mac 上实测。
+
+## 更新日志
+
+### 1.0.2
+
+- 新增 **Wi‑Fi 传输**：iPad 端广播 Bonjour 服务 `_ipaddisplay._tcp`，Mac 端点「搜索 Wi‑Fi」自动发现，USB / Wi‑Fi 设备出现在同一个列表里，随时切换。
+- 新增 **音频透传开关**：打开时把 Mac 系统声音以 48 kHz / 16 bit / 立体声裸 PCM 推到 iPad 播放，关掉则声音留在 Mac。
+- 新增 **后台常驻**：关闭窗口不再退出，推流继续；菜单栏图标可查看状态、断开、恢复窗口、退出。
+- iPad 端提示语加了深色底板，白色画面或断线时也能看清文字。
+
+### 1.0.1
+
+- 修复「系统设置里已授权但应用仍提示没权限」，加了权限重置按钮。
+- DMG 改为 arm64 + x86_64 通用二进制。
+- 接入 GitHub Actions：打 tag 自动构建并发布 Release。
 
 ## 许可
 

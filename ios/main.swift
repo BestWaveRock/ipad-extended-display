@@ -6,6 +6,8 @@ private enum MessageType: UInt8 {
     case config = 1
     case videoFrame = 2
     case touch = 3
+    case audioConfig = 4
+    case audioFrame = 5
 }
 
 @UIApplicationMain
@@ -34,6 +36,11 @@ final class DisplayViewController: UIViewController {
     private var formatDescription: CMVideoFormatDescription?
     private var frameIndex: Int64 = 0
     private var renderedFrames = 0
+
+    private let audioEngine = AVAudioEngine()
+    private let audioPlayer = AVAudioPlayerNode()
+    private var audioFormat: AVAudioFormat?
+    private var audioRunning = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -104,11 +111,12 @@ final class DisplayViewController: UIViewController {
             setStatus("监听失败")
             return
         }
+        listener.service = NWListener.Service(name: UIDevice.current.name, type: "_ipaddisplay._tcp")
         listener.stateUpdateHandler = { [weak self] state in
             DispatchQueue.main.async {
                 switch state {
                 case .ready:
-                    self?.setStatus("等待 Mac 连接…\n(listening :12346)")
+                    self?.setStatus("等待 Mac 连接…\n已广播 _ipaddisplay._tcp · :12346")
                 case .waiting(let error), .failed(let error):
                     self?.setStatus("监听异常: \(error.localizedDescription)")
                 default:
@@ -129,6 +137,7 @@ final class DisplayViewController: UIViewController {
         readBuffer.removeAll()
         formatDescription = nil
         frameIndex = 0
+        stopAudio()
         displayLayer.flushAndRemoveImage()
 
         connection.stateUpdateHandler = { [weak self] state in
@@ -187,9 +196,76 @@ final class DisplayViewController: UIViewController {
             configure(with: payload)
         case .videoFrame:
             enqueueFrame(payload)
+        case .audioConfig:
+            configureAudio(with: payload)
+        case .audioFrame:
+            enqueueAudio(payload)
         default:
             break
         }
+    }
+
+    private func configureAudio(with payload: Data) {
+        guard payload.count >= 8 else { return }
+        let bytes = [UInt8](payload)
+        let sampleRate = Double(UInt32(bytes[0]) << 24 | UInt32(bytes[1]) << 16
+                               | UInt32(bytes[2]) << 8 | UInt32(bytes[3]))
+        let channels = UInt32(bytes[4]) << 8 | UInt32(bytes[5])
+        let bits = UInt32(bytes[6]) << 8 | UInt32(bytes[7])
+        guard sampleRate >= 8000, channels > 0, channels <= 8, bits == 16 else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.startAudio(sampleRate: sampleRate, channels: channels)
+        }
+    }
+
+    private func startAudio(sampleRate: Double, channels: UInt32) {
+        stopAudio()
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatInt16,
+                                         sampleRate: sampleRate,
+                                         channels: AVAudioChannelCount(channels),
+                                         interleaved: true) else { return }
+        let session = AVAudioSession.sharedInstance()
+        try? session.setCategory(.playback, mode: .default)
+        try? session.setActive(true)
+
+        audioEngine.attach(audioPlayer)
+        audioEngine.connect(audioPlayer, to: audioEngine.mainMixerNode, format: format)
+        audioEngine.prepare()
+        guard (try? audioEngine.start()) != nil else {
+            audioEngine.detach(audioPlayer)
+            return
+        }
+        audioPlayer.play()
+        audioFormat = format
+        audioRunning = true
+    }
+
+    private func stopAudio() {
+        guard audioRunning || audioFormat != nil else { return }
+        audioRunning = false
+        audioFormat = nil
+        audioPlayer.stop()
+        audioEngine.stop()
+        audioEngine.disconnectNodeOutput(audioPlayer)
+        audioEngine.detach(audioPlayer)
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
+    private func enqueueAudio(_ payload: Data) {
+        guard audioRunning, let format = audioFormat else { return }
+        let bytesPerFrame = Int(format.streamDescription.pointee.mBytesPerFrame)
+        guard bytesPerFrame > 0 else { return }
+        let frames = payload.count / bytesPerFrame
+        guard frames > 0,
+              let buffer = AVAudioPCMBuffer(pcmFormat: format,
+                                            frameCapacity: AVAudioFrameCount(frames)),
+              let target = buffer.int16ChannelData?[0] else { return }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        payload.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            memcpy(target, base, frames * bytesPerFrame)
+        }
+        audioPlayer.scheduleBuffer(buffer, completionHandler: nil)
     }
 
     private func configure(with payload: Data) {

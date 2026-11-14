@@ -21,6 +21,7 @@ struct ContentView: View {
                         banners
                         deviceCard
                         screenCard
+                        outputCard
                         permissionCard
                         statsCard
                         logCard
@@ -38,7 +39,10 @@ struct ContentView: View {
         }
         .frame(minWidth: 560, idealWidth: 560, minHeight: 760)
         .preferredColorScheme(.dark)
-        .onAppear { model.refreshDevices() }
+        .onAppear {
+            model.refreshDevices()
+            model.startDiscovery()
+        }
         .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
             model.refreshPermissions()
         }
@@ -55,7 +59,7 @@ struct ContentView: View {
                 Text("iPad 扩展屏")
                     .font(.system(size: 21, weight: .bold, design: .rounded))
                     .foregroundStyle(.white)
-                Text("USB 有线 · 4:3 原生比例 · 触控回传")
+                Text("USB / Wi-Fi · 4:3 原生比例 · 触控与音频回传")
                     .font(.system(size: 11.5))
                     .foregroundStyle(.white.opacity(0.55))
             }
@@ -110,11 +114,11 @@ struct ContentView: View {
     }
 
     private var deviceCard: some View {
-        Card(title: "连接设备", subtitle: "USB 直连，无需 Wi-Fi") {
+        Card(title: "连接设备", subtitle: "USB 有线优先，也支持 Wi-Fi 局域网") {
             VStack(spacing: 10) {
                 if model.devices.isEmpty {
                     HStack {
-                        Text("没有检测到设备，请用数据线连接 iPad 并点按「信任」")
+                        Text("没有检测到设备：插上数据线点「信任」，或在 iPad 端打开 App 走 Wi-Fi")
                             .font(.system(size: 12))
                             .foregroundStyle(.white.opacity(0.5))
                         Spacer()
@@ -132,8 +136,15 @@ struct ContentView: View {
                             .font(.system(size: 11.5, weight: .medium))
                     }
                     .buttonStyle(SoftButtonStyle())
+                    Button {
+                        model.startDiscovery()
+                    } label: {
+                        Label("搜索 Wi-Fi", systemImage: "wifi")
+                            .font(.system(size: 11.5, weight: .medium))
+                    }
+                    .buttonStyle(SoftButtonStyle())
                     Spacer()
-                    Text(verbatim: model.selectedDevice == nil ? "等待设备" : "端口 12346")
+                    Text(verbatim: model.selectedDevice.map { "端口 \($0.port)" } ?? "等待设备")
                         .font(.system(size: 10.5, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.35))
                 }
@@ -141,10 +152,10 @@ struct ContentView: View {
         }
     }
 
-    private func deviceRow(_ device: MuxDevice) -> some View {
-        let selected = model.selectedDeviceUDID == device.udid
+    private func deviceRow(_ device: DisplayDevice) -> some View {
+        let selected = model.selectedDeviceID == device.id
         return Button {
-            model.selectedDeviceUDID = device.udid
+            model.selectedDeviceID = device.id
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: device.isUSB ? "ipad.landscape" : "wifi")
@@ -152,17 +163,17 @@ struct ContentView: View {
                     .foregroundStyle(selected ? accent : .white.opacity(0.5))
                     .frame(width: 22)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(deviceTitle(device))
+                    Text(device.name)
                         .font(.system(size: 12.5, weight: .semibold))
                         .foregroundStyle(.white.opacity(0.92))
-                    Text(verbatim: device.shortUDID)
+                    Text(verbatim: device.detail)
                         .font(.system(size: 9.5, design: .monospaced))
                         .foregroundStyle(.white.opacity(0.35))
                         .lineLimit(1)
-                        .help(device.udid)
+                        .help(device.detail)
                 }
                 Spacer()
-                Text(device.isUSB ? "USB" : "网络")
+                Text(device.transport.rawValue)
                     .font(.system(size: 9.5, weight: .bold))
                     .foregroundStyle(device.isUSB ? accent : .white.opacity(0.45))
                     .padding(.horizontal, 7)
@@ -176,11 +187,6 @@ struct ContentView: View {
                 .stroke(selected ? accent.opacity(0.55) : .white.opacity(0.07), lineWidth: 1))
         }
         .buttonStyle(.plain)
-    }
-
-    private func deviceTitle(_ device: MuxDevice) -> String {
-        if let name = device.name, !name.isEmpty { return name }
-        return device.model ?? "iPad"
     }
 
     private var screenCard: some View {
@@ -273,6 +279,46 @@ struct ContentView: View {
                 .padding(.top, 2)
             }
         }
+    }
+
+    private var outputCard: some View {
+        Card(title: "输出与后台", subtitle: "声音与常驻") {
+            VStack(spacing: 8) {
+                toggleRow(title: "音频透传到 iPad",
+                          detail: "把 Mac 系统声音一起推过去；关闭则声音留在 Mac",
+                          icon: "speaker.wave.2.fill",
+                          isOn: $model.audioEnabled)
+                toggleRow(title: "关闭窗口后继续运行",
+                          detail: "推流不中断，可从菜单栏图标恢复窗口或断开",
+                          icon: "menubar.rectangle",
+                          isOn: $model.runInBackground)
+            }
+        }
+    }
+
+    private func toggleRow(title: String, detail: String, icon: String,
+                           isOn: Binding<Bool>) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.45))
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.4))
+            }
+            Spacer()
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.white.opacity(0.03)))
     }
 
     private func permissionRow(title: String, detail: String,

@@ -162,4 +162,57 @@ enum Usbmux {
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, socklen_t(MemoryLayout<Int32>.size))
         return fd
     }
+
+    static func connect(host: String, port: UInt16, timeout: TimeInterval = 5) throws -> Int32 {
+        var hints = addrinfo(ai_flags: AI_ADDRCONFIG,
+                             ai_family: AF_UNSPEC,
+                             ai_socktype: SOCK_STREAM,
+                             ai_protocol: IPPROTO_TCP,
+                             ai_addrlen: 0,
+                             ai_canonname: nil,
+                             ai_addr: nil,
+                             ai_next: nil)
+        var result: UnsafeMutablePointer<addrinfo>?
+        let status = getaddrinfo(host, String(port), &hints, &result)
+        guard status == 0, let head = result else {
+            throw UsbmuxError.messaging("无法解析 \(host)：\(String(cString: gai_strerror(status)))")
+        }
+        defer { freeaddrinfo(head) }
+
+        var lastError = "连接 \(host):\(port) 失败"
+        var candidate: UnsafeMutablePointer<addrinfo>? = head
+        while let info = candidate {
+            let fd = socket(info.pointee.ai_family, info.pointee.ai_socktype, info.pointee.ai_protocol)
+            if fd >= 0 {
+                var flags = fcntl(fd, F_GETFL, 0)
+                flags |= O_NONBLOCK
+                fcntl(fd, F_SETFL, flags)
+
+                let rc = Darwin.connect(fd, info.pointee.ai_addr, info.pointee.ai_addrlen)
+                if rc == 0 || errno == EINPROGRESS {
+                    var descriptor = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+                    let ready = poll(&descriptor, 1, Int32(timeout * 1000))
+                    if ready > 0 {
+                        var soError: Int32 = 0
+                        var length = socklen_t(MemoryLayout<Int32>.size)
+                        getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &length)
+                        if soError == 0 {
+                            flags &= ~O_NONBLOCK
+                            fcntl(fd, F_SETFL, flags)
+                            var noSigpipe: Int32 = 1
+                            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe,
+                                       socklen_t(MemoryLayout<Int32>.size))
+                            return fd
+                        }
+                        lastError = "连接 \(host):\(port) 被拒绝（\(String(cString: strerror(soError)))）"
+                    } else {
+                        lastError = "连接 \(host):\(port) 超时，请确认 iPad 与 Mac 在同一网络"
+                    }
+                }
+                close(fd)
+            }
+            candidate = info.pointee.ai_next
+        }
+        throw UsbmuxError.messaging(lastError)
+    }
 }

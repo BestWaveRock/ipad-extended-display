@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 APP_NAME="iPad 扩展屏"
-VERSION="1.0.1"
+VERSION="1.0.2"
 DIST="dist"
 TRASH="${TMPDIR:-/tmp}/ipad-display-trash"
 export ARCHS=${ARCHS:-"arm64 x86_64"}

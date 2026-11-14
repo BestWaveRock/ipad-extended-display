@@ -24,8 +24,13 @@ cat > "$APP/Info.plist" <<'PLIST'
     <key>CFBundleName</key><string>iPadDisplay</string>
     <key>CFBundleDisplayName</key><string>iPad 扩展屏</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>1.0</string>
-    <key>CFBundleVersion</key><string>1</string>
+    <key>CFBundleShortVersionString</key><string>1.0.2</string>
+    <key>CFBundleVersion</key><string>2</string>
+    <key>NSLocalNetworkUsageDescription</key><string>用于在局域网内被 Mac 发现，把 iPad 作为扩展屏。</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_ipaddisplay._tcp</string>
+    </array>
     <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
     <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
     <key>CFBundleIcons</key>
