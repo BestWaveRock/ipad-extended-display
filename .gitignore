@@ -1,0 +1,8 @@
+build/
+dist/
+ios/build/
+ios/*.ipa
+*.dmg
+assets/mac.iconset/
+.DS_Store
+mac/ipad-usb-display
