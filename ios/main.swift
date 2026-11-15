@@ -9,6 +9,9 @@ private enum MessageType: UInt8 {
     case touch = 3
     case audioConfig = 4
     case audioFrame = 5
+    case keyboard = 6
+    case textInput = 7
+    case scroll = 8
 }
 
 @UIApplicationMain
@@ -31,8 +34,10 @@ final class DisplayViewController: UIViewController {
     private let statusContainer = UIView()
     private let touchView = TouchView()
     private let controlBar = UIStackView()
+    private let modeButton = UIButton(type: .system)
     private let audioButton = UIButton(type: .system)
     private let linkButton = UIButton(type: .system)
+    private let keyboardCatcher = KeyboardCatcher()
     private let volumeView = MPVolumeView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
 
     private var listener: NWListener?
@@ -45,6 +50,7 @@ final class DisplayViewController: UIViewController {
     private var controlsVisible = true
     private var suppressGesture = false
     private var fadeWork: DispatchWorkItem?
+    private var scrollMode = UserDefaults.standard.bool(forKey: "ipadScrollMode")
     private let audioStateLock = NSLock()
     private var audioMuted = UserDefaults.standard.bool(forKey: "ipadAudioMuted")
 
@@ -85,6 +91,7 @@ final class DisplayViewController: UIViewController {
         view.addSubview(statusContainer)
 
         touchView.translatesAutoresizingMaskIntoConstraints = false
+        touchView.isScrollMode = scrollMode
         touchView.onTouch = { [weak self] phase, point in
             guard let self else { return }
             if phase == 0 {
@@ -98,8 +105,22 @@ final class DisplayViewController: UIViewController {
             guard !self.suppressGesture else { return }
             self.sendTouch(phase: phase, point: point)
         }
+        touchView.onMove = { [weak self] point in
+            self?.sendTouch(phase: 3, point: point)
+        }
+        touchView.onClick = { [weak self] point in
+            self?.sendTouch(phase: 0, point: point)
+            self?.sendTouch(phase: 2, point: point)
+        }
+        touchView.onRightClick = { [weak self] point in
+            self?.sendTouch(phase: 4, point: point)
+        }
+        touchView.onScroll = { [weak self] dx, dy in
+            self?.sendScroll(dx: dx, dy: dy)
+        }
         view.addSubview(touchView)
 
+        configureControl(modeButton, action: #selector(toggleMode))
         configureControl(audioButton, action: #selector(toggleAudio))
         configureControl(linkButton, action: #selector(toggleLink))
 
@@ -107,13 +128,23 @@ final class DisplayViewController: UIViewController {
         controlBar.spacing = 10
         controlBar.alignment = .fill
         controlBar.translatesAutoresizingMaskIntoConstraints = false
+        controlBar.addArrangedSubview(modeButton)
         controlBar.addArrangedSubview(audioButton)
         controlBar.addArrangedSubview(linkButton)
         view.addSubview(controlBar)
 
+        keyboardCatcher.alpha = 0.02
+        keyboardCatcher.isUserInteractionEnabled = false
+        keyboardCatcher.onInsert = { [weak self] text in self?.sendInsert(text) }
+        keyboardCatcher.onDelete = { [weak self] in self?.sendMessage(.textInput, payload: Data([1])) }
+        keyboardCatcher.onReturn = { [weak self] in self?.sendMessage(.textInput, payload: Data([2])) }
+        keyboardCatcher.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(keyboardCatcher)
+
         volumeView.alpha = 0.01
         volumeView.isUserInteractionEnabled = false
         view.addSubview(volumeView)
+        updateModeButton()
         updateAudioButton()
         updateLinkButton()
 
@@ -135,7 +166,11 @@ final class DisplayViewController: UIViewController {
             volumeView.widthAnchor.constraint(equalToConstant: 1),
             volumeView.heightAnchor.constraint(equalToConstant: 1),
             volumeView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            volumeView.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+            volumeView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            keyboardCatcher.widthAnchor.constraint(equalToConstant: 1),
+            keyboardCatcher.heightAnchor.constraint(equalToConstant: 1),
+            keyboardCatcher.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            keyboardCatcher.topAnchor.constraint(equalTo: view.topAnchor)
         ])
 
         UIApplication.shared.isIdleTimerDisabled = true
@@ -213,6 +248,14 @@ final class DisplayViewController: UIViewController {
         showControls()
     }
 
+    @objc private func toggleMode() {
+        scrollMode.toggle()
+        UserDefaults.standard.set(scrollMode, forKey: "ipadScrollMode")
+        touchView.isScrollMode = scrollMode
+        updateModeButton()
+        showControls()
+    }
+
     private func dropConnection() {
         connection?.cancel()
         connection = nil
@@ -238,6 +281,12 @@ final class DisplayViewController: UIViewController {
     private func updateAudioButton() {
         audioButton.setTitle(audioMuted ? "声音 关" : "声音 开", for: .normal)
         audioButton.setTitleColor(audioMuted ? UIColor.white.withAlphaComponent(0.55) : .white, for: .normal)
+    }
+
+    private func updateModeButton() {
+        modeButton.setTitle(scrollMode ? "滑动" : "鼠标", for: .normal)
+        modeButton.setTitleColor(scrollMode ? UIColor(red: 0.45, green: 0.85, blue: 1, alpha: 1) : .white,
+                                 for: .normal)
     }
 
     private func updateLinkButton() {
@@ -346,6 +395,8 @@ final class DisplayViewController: UIViewController {
             configureAudio(with: payload)
         case .audioFrame:
             enqueueAudio(payload)
+        case .keyboard:
+            setKeyboardVisible(payload.first == 1)
         default:
             break
         }
@@ -573,8 +624,17 @@ final class DisplayViewController: UIViewController {
         }
     }
 
-    private func sendTouch(phase: UInt8, point: CGPoint) {
+    private func sendMessage(_ type: MessageType, payload: Data) {
         guard let connection else { return }
+        var header = Data()
+        var length = UInt32(payload.count).bigEndian
+        withUnsafeBytes(of: &length) { header.append(contentsOf: $0) }
+        header.append(type.rawValue)
+        header.append(contentsOf: [0, 0, 0])
+        connection.send(content: header + payload, completion: .contentProcessed { _ in })
+    }
+
+    private func sendTouch(phase: UInt8, point: CGPoint) {
         let x = Float(point.x / max(view.bounds.width, 1))
         let y = Float(point.y / max(view.bounds.height, 1))
         var payload = Data([phase])
@@ -582,12 +642,33 @@ final class DisplayViewController: UIViewController {
             var bits = value.bitPattern.bigEndian
             withUnsafeBytes(of: &bits) { payload.append(contentsOf: $0) }
         }
-        var header = Data()
-        var length = UInt32(payload.count).bigEndian
-        withUnsafeBytes(of: &length) { header.append(contentsOf: $0) }
-        header.append(MessageType.touch.rawValue)
-        header.append(contentsOf: [0, 0, 0])
-        connection.send(content: header + payload, completion: .contentProcessed { _ in })
+        sendMessage(.touch, payload: payload)
+    }
+
+    private func sendScroll(dx: CGFloat, dy: CGFloat) {
+        var payload = Data()
+        for value in [Float(dx), Float(dy)] {
+            var bits = value.bitPattern.bigEndian
+            withUnsafeBytes(of: &bits) { payload.append(contentsOf: $0) }
+        }
+        sendMessage(.scroll, payload: payload)
+    }
+
+    private func sendInsert(_ text: String) {
+        var payload = Data([0])
+        payload.append(text.data(using: .utf8) ?? Data())
+        sendMessage(.textInput, payload: payload)
+    }
+
+    private func setKeyboardVisible(_ visible: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if visible {
+                self.keyboardCatcher.becomeFirstResponder()
+            } else {
+                self.keyboardCatcher.resignFirstResponder()
+            }
+        }
     }
 
     private func setStatus(_ text: String) {
@@ -602,33 +683,153 @@ final class DisplayViewController: UIViewController {
 
 final class TouchView: UIView {
     var onTouch: ((UInt8, CGPoint) -> Void)?
+    var onMove: ((CGPoint) -> Void)?
+    var onClick: ((CGPoint) -> Void)?
+    var onRightClick: ((CGPoint) -> Void)?
+    var onScroll: ((CGFloat, CGFloat) -> Void)?
+    var isScrollMode = false
+
+    private var fingerCount = 0
+    private var lastPoint: CGPoint?
+    private var dragDistance: CGFloat = 0
+    private var scrolled = false
+    private var twoFingerStart: Date?
+    private var twoFingerOrigin: CGPoint = .zero
+    private var twoFingerMoved = false
+
+    private let scrollStep: CGFloat = 12
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
-        isMultipleTouchEnabled = false
+        isMultipleTouchEnabled = true
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        emit(touches, phase: 0)
+        let all = event?.allTouches ?? touches
+        if all.count >= 2 {
+            fingerCount = all.count
+            twoFingerStart = Date()
+            twoFingerOrigin = centroid(all)
+            twoFingerMoved = false
+            return
+        }
+        guard let touch = touches.first else { return }
+        fingerCount = 1
+        let point = touch.location(in: self)
+        lastPoint = point
+        dragDistance = 0
+        scrolled = false
+        if isScrollMode {
+            onMove?(point)
+        } else {
+            onTouch?(0, point)
+        }
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        emit(touches, phase: 1)
+        let all = event?.allTouches ?? touches
+        if fingerCount >= 2 {
+            if let start = twoFingerStart, Date().timeIntervalSince(start) > 0.35 {
+                twoFingerMoved = true
+            }
+            let point = centroid(all)
+            if hypot(point.x - twoFingerOrigin.x, point.y - twoFingerOrigin.y) > 16 {
+                twoFingerMoved = true
+            }
+            return
+        }
+        guard fingerCount == 1, let touch = touches.first, let previous = lastPoint else { return }
+        let point = touch.location(in: self)
+        let dx = point.x - previous.x
+        let dy = point.y - previous.y
+        lastPoint = point
+        dragDistance += hypot(dx, dy)
+
+        guard isScrollMode else {
+            onTouch?(1, point)
+            return
+        }
+        guard dragDistance > 10 else { return }
+        scrolled = true
+        let length = hypot(dx, dy)
+        guard length > 0.5 else { return }
+        let scale = scrollStep / length
+        onScroll?(dx * scale, dy * scale)
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        emit(touches, phase: 2)
+        finish(touches, event: event, cancelled: false)
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        emit(touches, phase: 2)
+        finish(touches, event: event, cancelled: true)
     }
 
-    private func emit(_ touches: Set<UITouch>, phase: UInt8) {
-        guard let touch = touches.first else { return }
-        onTouch?(phase, touch.location(in: self))
+    private func finish(_ touches: Set<UITouch>, event: UIEvent?, cancelled: Bool) {
+        let remaining = activeFingers(event, fallback: touches)
+        if fingerCount >= 2 {
+            guard remaining == 0 else { return }
+            if !cancelled,
+               !twoFingerMoved,
+               let start = twoFingerStart,
+               Date().timeIntervalSince(start) < 0.6 {
+                onRightClick?(twoFingerOrigin)
+            }
+            fingerCount = 0
+            twoFingerStart = nil
+            return
+        }
+        guard fingerCount == 1 else { return }
+        fingerCount = 0
+        let point = touches.first.map { $0.location(in: self) } ?? lastPoint ?? .zero
+        if isScrollMode {
+            if !cancelled, !scrolled { onClick?(point) }
+        } else {
+            onTouch?(2, point)
+        }
+    }
+
+    private func activeFingers(_ event: UIEvent?, fallback: Set<UITouch>) -> Int {
+        guard let all = event?.allTouches else { return fallback.count }
+        return all.filter { $0.phase != .ended && $0.phase != .cancelled }.count
+    }
+
+    private func centroid(_ all: Set<UITouch>) -> CGPoint {
+        let points = all.map { $0.location(in: self) }
+        guard !points.isEmpty else { return .zero }
+        let sum = points.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x, y: $0.y + $1.y) }
+        return CGPoint(x: sum.x / CGFloat(points.count), y: sum.y / CGFloat(points.count))
+    }
+}
+
+final class KeyboardCatcher: UIView, UIKeyInput {
+    var onInsert: ((String) -> Void)?
+    var onDelete: (() -> Void)?
+    var onReturn: (() -> Void)?
+
+    var autocorrectionType: UITextAutocorrectionType = .no
+    var spellCheckingType: UITextSpellCheckingType = .no
+    var autocapitalizationType: UITextAutocapitalizationType = .none
+    var keyboardType: UIKeyboardType = .default
+    var returnKeyType: UIReturnKeyType = .default
+    var enablesReturnKeyAutomatically: Bool = false
+    var isSecureTextEntry: Bool = false
+
+    override var canBecomeFirstResponder: Bool { true }
+    var hasText: Bool { true }
+
+    func insertText(_ text: String) {
+        if text == "\n" {
+            onReturn?()
+        } else {
+            onInsert?(text)
+        }
+    }
+
+    func deleteBackward() {
+        onDelete?()
     }
 }

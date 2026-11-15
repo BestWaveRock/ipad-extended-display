@@ -13,7 +13,7 @@ SLICES=()
 for arch in ${=ARCHS}; do
   swiftc -O -swift-version 5 -parse-as-library \
     -target "$arch-apple-macos14.0" -sdk "$SDK" \
-    App.swift AppModel.swift ContentView.swift Permissions.swift StreamEngine.swift Usbmux.swift VirtualDisplay.swift WifiDiscovery.swift \
+    App.swift AppModel.swift ContentView.swift KeyboardFocus.swift Permissions.swift StreamEngine.swift Usbmux.swift VirtualDisplay.swift WifiDiscovery.swift \
     -o "../build/ipad-display-$arch" \
     -framework AppKit -framework SwiftUI -framework ScreenCaptureKit \
     -framework VideoToolbox -framework Network -framework ApplicationServices

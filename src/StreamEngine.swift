@@ -12,6 +12,9 @@ enum MessageType: UInt8 {
     case touch = 3
     case audioConfig = 4
     case audioFrame = 5
+    case keyboard = 6
+    case textInput = 7
+    case scroll = 8
 }
 
 struct StreamStats {
@@ -254,20 +257,95 @@ final class StreamEngine: NSObject {
             guard readBuffer.count >= 8 + Int(length) else { return }
             let payload = [UInt8](readBuffer.dropFirst(8).prefix(Int(length)))
             readBuffer.removeFirst(8 + Int(length))
-            guard header[4] == MessageType.touch.rawValue, payload.count >= 9 else { continue }
-            let phase = payload[0]
-            let xBits = UInt32(payload[1]) << 24 | UInt32(payload[2]) << 16
-                | UInt32(payload[3]) << 8 | UInt32(payload[4])
-            let yBits = UInt32(payload[5]) << 24 | UInt32(payload[6]) << 16
-                | UInt32(payload[7]) << 8 | UInt32(payload[8])
-            var nx = Double(Float(bitPattern: xBits))
-            var ny = Double(Float(bitPattern: yBits))
-            guard nx.isFinite, ny.isFinite else { continue }
-            nx = min(max(nx, 0), 1)
-            ny = min(max(ny, 0), 1)
-            stats.touches += 1
-            injectTouch(phase: phase, x: nx, y: ny)
+            guard let kind = MessageType(rawValue: header[4]) else { continue }
+            switch kind {
+            case .touch:
+                handleTouchPayload(payload)
+            case .scroll:
+                handleScrollPayload(payload)
+            case .textInput:
+                handleTextPayload(payload)
+            default:
+                continue
+            }
         }
+    }
+
+    private func handleTouchPayload(_ payload: [UInt8]) {
+        guard payload.count >= 9 else { return }
+        let phase = payload[0]
+        let xBits = UInt32(payload[1]) << 24 | UInt32(payload[2]) << 16
+            | UInt32(payload[3]) << 8 | UInt32(payload[4])
+        let yBits = UInt32(payload[5]) << 24 | UInt32(payload[6]) << 16
+            | UInt32(payload[7]) << 8 | UInt32(payload[8])
+        var nx = Double(Float(bitPattern: xBits))
+        var ny = Double(Float(bitPattern: yBits))
+        guard nx.isFinite, ny.isFinite else { return }
+        nx = min(max(nx, 0), 1)
+        ny = min(max(ny, 0), 1)
+        stats.touches += 1
+        injectTouch(phase: phase, x: nx, y: ny)
+    }
+
+    private func handleScrollPayload(_ payload: [UInt8]) {
+        guard payload.count >= 8 else { return }
+        let dxBits = UInt32(payload[0]) << 24 | UInt32(payload[1]) << 16
+            | UInt32(payload[2]) << 8 | UInt32(payload[3])
+        let dyBits = UInt32(payload[4]) << 24 | UInt32(payload[5]) << 16
+            | UInt32(payload[6]) << 8 | UInt32(payload[7])
+        let dx = Double(Float(bitPattern: dxBits))
+        let dy = Double(Float(bitPattern: dyBits))
+        guard dx.isFinite, dy.isFinite else { return }
+        injectScroll(dx: dx, dy: dy)
+    }
+
+    private func handleTextPayload(_ payload: [UInt8]) {
+        guard let kind = payload.first else { return }
+        switch kind {
+        case 0:
+            let text = String(decoding: payload.dropFirst(), as: UTF8.self)
+            guard !text.isEmpty else { return }
+            typeUnicode(text)
+        case 1:
+            tapKey(51)
+        case 2:
+            tapKey(36)
+        default:
+            break
+        }
+    }
+
+    func setKeyboardVisible(_ visible: Bool) {
+        send(.keyboard, payload: Data([visible ? 1 : 0]))
+    }
+
+    private func injectScroll(dx: Double, dy: Double) {
+        guard abs(dx) >= 0.5 || abs(dy) >= 0.5 else { return }
+        guard let event = CGEvent(scrollWheelEvent2Source: nil,
+                                  units: .pixel,
+                                  wheelCount: 2,
+                                  wheel1: Int32((-dy).rounded()),
+                                  wheel2: Int32(dx.rounded()),
+                                  wheel3: 0) else { return }
+        event.post(tap: .cghidEventTap)
+    }
+
+    private func typeUnicode(_ text: String) {
+        let units = Array(text.utf16)
+        for isDown in [true, false] {
+            guard let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: isDown) else { continue }
+            event.keyboardSetUnicodeString(stringLength: units.count, unicodeString: units)
+            event.post(tap: .cghidEventTap)
+        }
+        usleep(2_000)
+    }
+
+    private func tapKey(_ keyCode: CGKeyCode) {
+        for isDown in [true, false] {
+            guard let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: isDown) else { continue }
+            event.post(tap: .cghidEventTap)
+        }
+        usleep(2_000)
     }
 
     private func injectTouch(phase: UInt8, x: Double, y: Double) {
@@ -277,20 +355,27 @@ final class StreamEngine: NSObject {
             onLog?(String(format: "触控 (%.2f, %.2f) → 屏幕 (%.0f, %.0f)",
                           x, y, point.x, point.y))
         }
-        let type: CGEventType
+        postMouse(.mouseMoved, at: point, button: .left)
         switch phase {
-        case 0: type = .leftMouseDown
-        case 1: type = .leftMouseDragged
-        default: type = .leftMouseUp
+        case 3:
+            return
+        case 4:
+            postMouse(.rightMouseDown, at: point, button: .right)
+            postMouse(.rightMouseUp, at: point, button: .right)
+            return
+        case 0:
+            postMouse(.leftMouseDown, at: point, button: .left)
+        case 1:
+            postMouse(.leftMouseDragged, at: point, button: .left)
+        default:
+            postMouse(.leftMouseUp, at: point, button: .left)
         }
-        if let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
-                              mouseCursorPosition: point, mouseButton: .left) {
-            move.post(tap: .cghidEventTap)
-        }
-        if let event = CGEvent(mouseEventSource: nil, mouseType: type,
-                               mouseCursorPosition: point, mouseButton: .left) {
-            event.post(tap: .cghidEventTap)
-        }
+    }
+
+    private func postMouse(_ type: CGEventType, at point: CGPoint, button: CGMouseButton) {
+        guard let event = CGEvent(mouseEventSource: nil, mouseType: type,
+                                 mouseCursorPosition: point, mouseButton: button) else { return }
+        event.post(tap: .cghidEventTap)
     }
 
     private func send(_ type: MessageType, payload: Data) {

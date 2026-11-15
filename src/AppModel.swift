@@ -77,6 +77,8 @@ final class AppModel: ObservableObject {
     private var usbDevices: [DisplayDevice] = []
     private var reconnectTask: Task<Void, Never>?
     private var userStopped = false
+    private var keyboardTimer: Timer?
+    private var keyboardShown = false
 
     init() {
         let defaults = UserDefaults.standard
@@ -260,6 +262,7 @@ final class AppModel: ObservableObject {
     func stop() {
         userStopped = true
         cancelReconnect()
+        stopKeyboardWatcher()
         engine?.stop()
         engine = nil
         phase = .idle
@@ -271,6 +274,30 @@ final class AppModel: ObservableObject {
         reconnectTask?.cancel()
         reconnectTask = nil
         reconnecting = false
+    }
+
+    private func startKeyboardWatcher(engine: StreamEngine) {
+        stopKeyboardWatcher()
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refreshKeyboardState(engine: engine) }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        keyboardTimer = timer
+    }
+
+    private func stopKeyboardWatcher() {
+        keyboardTimer?.invalidate()
+        keyboardTimer = nil
+        keyboardShown = false
+    }
+
+    private func refreshKeyboardState(engine: StreamEngine) {
+        guard self.engine === engine else { return }
+        let wantsKeyboard = KeyboardFocus.isTextInputFocused()
+        guard wantsKeyboard != keyboardShown else { return }
+        keyboardShown = wantsKeyboard
+        engine.setKeyboardVisible(wantsKeyboard)
+        append(wantsKeyboard ? "光标在输入框里，已唤起 iPad 键盘" : "输入框失焦，已收起 iPad 键盘")
     }
 
     private func beginAutoReconnect(device: DisplayDevice) {
@@ -423,6 +450,7 @@ final class AppModel: ObservableObject {
         engine.onDisconnect = { [weak self] reason in
             Task { @MainActor in
                 guard let self else { return }
+                self.stopKeyboardWatcher()
                 self.engine?.stop()
                 self.engine = nil
                 self.phase = .idle
@@ -437,6 +465,7 @@ final class AppModel: ObservableObject {
                                audio: audioEnabled,
                                fps: Int(refreshRate), bitrate: bitrateMbps * 1_000_000)
         phase = .streaming
+        startKeyboardWatcher(engine: engine)
         append("画面已推送到 iPad，可直接用 iPad 触摸操作")
     }
 

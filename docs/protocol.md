@@ -29,6 +29,9 @@ Mac 与 iPad 之间是一条**裸 TCP 流**（USB 走 usbmux 隧道，Wi‑Fi �
 | `3` | `touch` | iPad → Mac | 触控事件 |
 | `4` | `audioConfig` | Mac → iPad | 音频格式协商（采样率 / 声道 / 位深） |
 | `5` | `audioFrame` | Mac → iPad | 一帧裸 PCM 数据 |
+| `6` | `keyboard` | Mac → iPad | 通知 iPad 唤起 / 收起软键盘 |
+| `7` | `textInput` | iPad → Mac | 文字输入、退格、回车 |
+| `8` | `scroll` | iPad → Mac | 滑动模式的滚动增量 |
 
 ## config（type = 1）
 
@@ -55,7 +58,8 @@ iPad 侧把它塞进 `CMBlockBuffer`，配上 `nalUnitHeaderLength = 4` 的 form
 ## touch（type = 3）
 
 ```
-uint8  phase      0 = began，1 = moved，2 = ended/cancelled
+uint8  phase      0 = began（含左键按下），1 = moved（拖动），2 = ended（含左键抬起），
+                  3 = 只移动光标不点击，4 = 在坐标处右键单击
 float32 x         归一化 0…1，大端
 float32 y         归一化 0…1，大端
 ```
@@ -70,6 +74,41 @@ point = (bounds.origin.x + x * bounds.width,
 然后投递 `mouseMoved` + `leftMouseDown/Dragged/Up` 三种 `CGEvent`（`.cghidEventTap`）。
 
 **注意**：坐标是相对 iPad 整个屏幕归一化的，不是相对视频画面内容。如果虚拟屏比例和 iPad 屏幕比例不一致导致画面出现黑边，边缘区域的点击会有偏移。默认的 4:3 预设不存在这个问题。
+
+`phase = 3`（滑动模式的首次落指）只投递 `mouseMoved`；`phase = 4`（双指轻点）先移动光标再投递 `rightMouseDown/rightMouseUp`。
+
+## keyboard（type = 6）
+
+```
+uint8 visible     1 = 唤起 iPad 软键盘，0 = 收起
+```
+
+负载固定 1 字节。Mac 用辅助功能 API 每 0.5 秒检查一次焦点元素：落在 `AXTextField` / `AXTextArea` / `AXComboBox` / 搜索框上就发 `1`，离开就发 `0`。
+
+## textInput（type = 7）
+
+```
+uint8 kind        0 = 插入文字，1 = 退格，2 = 回车
+byte[] utf8       kind = 0 时的 UTF-8 文本，其它 kind 为空
+```
+
+Mac 收到后用 `CGEvent.keyboardSetUnicodeString` 投递按键，所以中文、emoji 都能直接落到当前输入框；退格与回车分别用虚拟键码 51 / 36。
+
+iPad 端用一个 1×1 的 `UIKeyInput` 视图接收系统键盘输入：输入法组词由系统处理，最终 `insertText` 拿到的就是成品文字。
+
+## scroll（type = 8）
+
+```
+float32 dx       手指横向位移，大端（正 = 向右）
+float32 dy       手指纵向位移，大端（正 = 向下）
+```
+
+只在「滑动模式」下发送。iPad 每次 `touchesMoved` 把位移方向归一化成固定 12 像素的增量，所以滚动速度恒定、只跟方向有关，跟手指快慢无关。Mac 侧换算成 `CGEvent` 的双轴滚动：
+
+```
+wheel1 = -dy   （自然滚动：手指向下 → 内容向下）
+wheel2 = dx
+```
 
 ## audioConfig（type = 4）
 
