@@ -8,7 +8,7 @@ struct IPadDisplayApp: App {
     @StateObject private var model = AppModel()
 
     var body: some Scene {
-        WindowGroup("iPad 扩展屏") {
+        Window("iPad 扩展屏", id: "main") {
             ContentView(model: model)
                 .onAppear {
                     delegate.model = model
@@ -133,8 +133,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func showWindow() {
         NSApp.setActivationPolicy(.regular)
-        if let window = mainWindow ?? NSApp.windows.first {
-            window.makeKeyAndOrderFront(nil)
+        let target = mainWindow ?? NSApp.windows.first(where: { $0.canBecomeMain && $0.contentView != nil })
+        target?.makeKeyAndOrderFront(nil)
+        for extra in NSApp.windows where extra !== target && extra.canBecomeMain {
+            extra.orderOut(nil)
         }
         NSApp.activate(ignoringOtherApps: true)
     }
